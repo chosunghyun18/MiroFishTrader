@@ -14,6 +14,16 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### MVP v1 전체 구현 완료
+
+- **구현**: report_store → mapper → polymarket → reporter → slack → pipeline → 스케줄 (7개 모두)
+- **Polymarket**: Gamma API(`/markets?order=volume24hr`) 실제 검증. 상위 거래량 마켓을 키워드 필터. `outcomePrices[0]`=Yes확률, `oneDayPriceChange`=추세. 실패 시 빈 결과로 degrade
+- **언어 정합성**: 추출 themes를 영어로 강제(소스 리포트·Polymarket이 영어). `ticker_map.yaml`은 영/한 별칭 병기
+- **graceful degrade 검증**: Ollama 미실행 시 중립 신호로 fallback, 리포트 없으면 안내 메시지, Polymarket 실패해도 부분 리포트 전송 — 모두 크래시 없음
+- **스케줄**: `scripts/run_daily.sh` + cron/launchd 가이드(README)
+- **테스트**: 29개 전부 통과 (extractor 9, report_store 4, mapper 4, polymarket 6, reporter 3, pipeline 3)
+- **남은 것(v2)**: Yahoo/FRED 시장데이터, 시드 생성·MiroFish 배치 트리거, Gmail, 캐싱
+
 ### MVP v1 범위 확정 + 작업 계획
 
 - **결정**: "최소한으로 빠르게" 원칙으로 v1 범위 확정

@@ -29,7 +29,7 @@ Return ONLY a JSON object (no prose, no code fences) with EXACTLY this shape:
 Rules:
 - trend_direction: overall crowd/market direction implied by the report.
 - confidence: 0.0-1.0, how strongly the report supports that direction.
-- themes: 1-6 concise sector/topic keywords.
+- themes: 1-6 concise sector/topic keywords, IN ENGLISH (e.g. "semiconductors", "rates").
 - entities: named companies/assets mentioned, with per-entity sentiment.
 - Output valid JSON only.
 

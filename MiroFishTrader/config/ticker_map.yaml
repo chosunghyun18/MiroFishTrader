@@ -1,13 +1,20 @@
 # 테마/엔티티 → 티커 정적 매핑 (v1: 수동 시드, 점진 확장)
+# 추출 themes는 영어 기준 (소스 리포트·Polymarket이 영어). 한글 별칭도 함께 둔다.
 # 매칭 실패 키워드는 로그로 남겨 여기에 보강한다.
 
 themes:
+  semiconductors: [SOXX, SMH]
   반도체: [SOXX, SMH]
-  AI: [BOTZ, AIQ]
+  ai: [BOTZ, AIQ]
+  rates: [TLT, IEF]
   금리: [TLT, IEF]
+  energy: [XLE]
   에너지: [XLE]
+  healthcare: [XLV]
   헬스케어: [XLV]
+  financials: [XLF]
   금융: [XLF]
+  bigtech: [QQQ, XLK]
   빅테크: [QQQ, XLK]
 
 entities:
