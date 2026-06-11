@@ -58,17 +58,53 @@ shared/mirofish/
 
 ### 3.2 출력 — report (MiroFish → MiroFishTrader)
 
-MiroFish Step 4 리포트 JSON. 핵심 소비 필드:
+⚠️ **실제 스키마 검증 완료 (2026-06-11, 백업 소스 기준)**.
+MiroFish 리포트는 구조화된 신호 필드가 **없고**, "미래 예측 보고서" 형태의 자유 산문이다.
 
-| 필드 | 용도 |
-|------|------|
-| `summary` | 리포트 도입부 컨텍스트 |
-| `insights` | 핵심 인사이트 목록 |
-| `sentiment_trend` | **"대중 추세" 신호의 핵심 소스** (심리 추이) |
-| `recommendations` | 참고용 추천 |
-| `interviews` | (선택) 근거 보강 |
+실제 `report.to_dict()` 스키마:
 
-> MiroFish는 엔티티/심리 중심이라 **종목 티커를 직접 제공하지 않음**.
+```json
+{
+  "report_id": "...",
+  "simulation_id": "...",
+  "graph_id": "...",
+  "simulation_requirement": "주입된 시나리오 변수(=시드 핵심)",
+  "status": "completed",
+  "outline": {
+    "title": "리포트 제목",
+    "summary": "핵심 예측 결과 한 문장",
+    "sections": [ {"title": "섹션 제목", "content": "산문 본문"} ]
+  },
+  "markdown_content": "전체 리포트 마크다운",
+  "created_at": "...", "completed_at": "...", "error": null
+}
+```
+
+| 필드 | 실제 성격 | MiroFishTrader 활용 |
+|------|----------|---------------------|
+| `outline.summary` | 한 문장 요약 | 리포트 도입부 |
+| `outline.sections[].content` | 자유 산문 (2~5개) | **추출 레이어 입력** |
+| `markdown_content` | 전체 마크다운 | 추출 레이어 입력 / 원문 첨부 |
+| `simulation_requirement` | 입력 시나리오 | 어떤 시드였는지 추적 |
+
+**중요한 현실**
+- `sentiment_trend`·`insights`·`recommendations`·`interviews` 같은 **구조화 필드는 존재하지 않음**.
+  이 개념들은 모두 `sections[].content` 산문 안에 녹아 있음.
+- **섹션 제목은 매 실행마다 LLM이 생성** (고정 아님) → 특정 섹션명에 의존 불가.
+- MiroFish는 엔티티/심리 중심이라 **종목 티커를 직접 제공하지 않음**.
+
+### 3.3 추출 레이어 (필수 추가 단계)
+
+자유 산문 → 구조화 신호로 변환하는 단계가 MiroFishTrader 측에 필요하다.
+
+```
+report.markdown_content (+ sections)
+  → LLM 추출 프롬프트 (로컬 Ollama = 무료, 비용 제약 부합)
+  → { trend_direction, mentioned_entities[], themes[], confidence }
+```
+
+- 출력 구조는 MiroFishTrader가 직접 정의/통제 (MiroFish 출력에 의존하지 않음).
+- 이 추출 JSON이 비로소 Analyzer의 "대중 추세" 신호 입력이 됨.
 
 ---
 
@@ -92,8 +128,9 @@ MiroFish 인사이트를 실제 거래 대상으로 연결하는 책임은 MiroF
   1. 시드 수집 → shared/mirofish/in/seed-YYYYMMDD.json 작성
   2. MiroFish 배치 트리거 (외부 실행: 시드 읽고 시뮬레이션 → out/report 작성)
   3. MiroFishTrader: out/latest.json 로드
-  4. Analyzer: sentiment_trend + 시장데이터(Yahoo/FRED/Polymarket) 결합 → 신호 생성
-  5. Report Builder → Slack / Gmail 전달
+  4. 추출 레이어: markdown_content → 구조화 신호 JSON (LLM 추출)
+  5. Analyzer: 추출 신호 + 시장데이터(Yahoo/FRED/Polymarket) 결합 → 신호 생성
+  6. Report Builder → Slack / Gmail 전달
 ```
 
 - 2번(MiroFish 실행)과 3~5번(MiroFishTrader)은 **시간 분리** 가능: MiroFish가 먼저 끝나도록 스케줄을 앞당기거나, report 파일 존재를 폴링.
@@ -105,6 +142,8 @@ MiroFish 인사이트를 실제 거래 대상으로 연결하는 책임은 MiroF
 
 - [ ] 시드 토픽 선정 로직 (자동 트렌딩 vs 고정 워치리스트)
 - [ ] MiroFish 배치를 누가 트리거하나 (별도 cron vs MiroFishTrader가 subprocess 호출)
-- [ ] report JSON 실제 스키마 확정 (MiroFish 출력 샘플로 검증 필요)
+- [x] ~~report JSON 실제 스키마 확정~~ → 검증 완료 (3.2 참조). 구조화 필드 없음, 자유 산문
+- [ ] 추출 레이어 출력 스키마 확정 (trend_direction/entities/themes/confidence 등)
+- [ ] 추출용 LLM 선택 (로컬 Ollama vs 저비용 API)
 - [ ] 엔티티/테마 → 티커 매핑 사전 구축
 - [ ] stale 기준 (몇 시간 지난 리포트까지 허용?)

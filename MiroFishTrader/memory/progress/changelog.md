@@ -14,6 +14,13 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### MiroFish 리포트 스키마 검증 — 추출 레이어 필요 확인
+
+- **발견**: 백업 소스(`report_agent.py`)로 실제 출력 스키마 검증 결과, `sentiment_trend`·`insights`·`recommendations`·`interviews` 같은 **구조화 필드가 존재하지 않음**
+- **실제 구조**: `{report_id, simulation_requirement, outline:{title, summary, sections:[{title, content}]}, markdown_content, ...}` — 섹션 제목은 매 실행마다 LLM 생성(2~5개), 신호는 전부 자유 산문
+- **결정**: MiroFishTrader에 **추출 레이어** 추가 — `markdown_content`를 LLM으로 파싱해 `{trend_direction, mentioned_entities, themes, confidence}` 구조화 신호 생성. 출력 스키마는 MiroFishTrader가 통제
+- **영향**: `architecture/mirofish-integration.md` 3.2/3.3 갱신, 일일 흐름에 추출 단계 추가
+
 ### MiroFish 인사이트 연동 방식 확정
 
 - **결정**: MiroFish 인사이트 연동을 **파일 기반 배치**로 확정 (REST API 오케스트레이션 미채택)
