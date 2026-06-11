@@ -54,8 +54,8 @@ MiroFish 오픈소스로 도출한 투자 인사이트를 바탕으로 보고서
 
 ## 미결 사항
 
-- [ ] MiroFish 인사이트를 어떤 형태로 연동할지 (배치 실행 결과 파싱 vs API)
-- [ ] 전달 채널: Slack / Gmail 중 택1 또는 병행
+- [x] ~~MiroFish 인사이트 연동 방식~~ → 파일 기반 배치 (`mirofish-integration.md`)
+- [x] ~~전달 채널~~ → **Slack 우선** (기존 Slack Webhook 재사용), Gmail은 추후
 - [ ] 스케줄러: cron vs Airflow vs APScheduler 선택
 - [ ] 캐시: 로컬 파일 vs Redis vs SQLite
 - [ ] Polymarket 데이터 수집 방식 (공식 API vs 스크래핑)

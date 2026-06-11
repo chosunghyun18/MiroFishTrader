@@ -14,6 +14,14 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### 추출 레이어·매핑·전달 채널 확정
+
+- **추출 출력 스키마 (확정)**: 플랫 구조 `{date, source_report_id, trend_direction(bullish/bearish/neutral), confidence(0~1), themes[], entities[{name, sentiment}], summary}`
+- **추출 LLM**: 로컬 Ollama 재사용 (MiroFish가 이미 띄우는 인스턴스 → 추가 비용 0)
+- **티커 매핑**: 정적 사전 `config/ticker_map.yaml` (수동 시드, 외부 API 없이 시작, 점진 확장). 매칭 실패 키워드는 로그로 보강
+- **전달 채널**: Slack 우선 — **기존 Slack Webhook 재사용**. Gmail은 추후
+- **갱신 문서**: `mirofish-integration.md` 3.3/4장, `overview.md` 미결사항
+
 ### MiroFish 리포트 스키마 검증 — 추출 레이어 필요 확인
 
 - **발견**: 백업 소스(`report_agent.py`)로 실제 출력 스키마 검증 결과, `sentiment_trend`·`insights`·`recommendations`·`interviews` 같은 **구조화 필드가 존재하지 않음**
