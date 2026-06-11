@@ -23,7 +23,7 @@ from .models import ExtractedSignal
 from .polymarket import PolymarketClient, SupportsFetchMarkets, find_markets
 from .report_store import load_latest_report
 from .reporter import build_slack_payload
-from .slack import send_payload
+from .slack import SlackError, send_payload
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,14 @@ def main() -> None:
     settings = Settings.from_env()
     llm = OllamaClient(settings.llm_base_url, settings.llm_model)
     pm_client = PolymarketClient()
-    payload = run_pipeline(settings, llm=llm, pm_client=pm_client, dry_run=args.dry_run)
+    try:
+        payload = run_pipeline(
+            settings, llm=llm, pm_client=pm_client, dry_run=args.dry_run
+        )
+    except SlackError as exc:
+        logger.error("Slack 전송 실패: %s", exc)
+        logger.error("→ .env의 SLACK_WEBHOOK_URL 설정을 확인하세요.")
+        raise SystemExit(1)
 
     if args.dry_run:
         print(json.dumps(payload, ensure_ascii=False, indent=2))

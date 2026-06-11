@@ -31,7 +31,7 @@ else
 fi
 
 echo "[3/3] 모델 pull"
-MODEL="qwen2.5:14b"
+MODEL="qwen2.5:7b"
 if [ -f .env ]; then
   envmodel="$(grep -E '^LLM_MODEL_NAME=' .env | cut -d= -f2- || true)"
   [ -n "${envmodel:-}" ] && MODEL="$envmodel"
