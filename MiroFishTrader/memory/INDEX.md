@@ -25,7 +25,7 @@
 
 | 문서 | 설명 |
 |------|------|
-| [concepts/etf-glossary.md](concepts/etf-glossary.md) | ETF 및 분석 지표 용어 정의 |
+| [concepts/etf-glossary.md](concepts/etf-glossary.md) | ETF·분석 지표 및 Polymarket(예측시장) 용어 정의 |
 
 ---
 

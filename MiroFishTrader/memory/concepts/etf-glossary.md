@@ -49,3 +49,19 @@
 | CPI (Consumer Price Index) | FRED | 인플레이션 측정 |
 | VIX | Yahoo Finance | 시장 변동성/공포 지수 |
 | Dollar Index (DXY) | Yahoo Finance | 달러 강세/약세 |
+
+---
+
+## 예측시장 (Polymarket) 용어
+
+이 프로젝트의 또 다른 투자 대상 시장.
+
+| 용어 | 정의 |
+|------|------|
+| 예측시장 (Prediction Market) | 미래 사건의 결과에 베팅하는 시장. 가격이 곧 사건 발생 확률(0~1)을 의미 |
+| Polymarket | 대표적인 탈중앙 예측시장 플랫폼 |
+| Market Probability | 특정 결과의 시장 추정 확률 (가격 = 확률) |
+| Resolution | 사건 종료 후 결과 확정 (Yes/No 정산) |
+| Liquidity / Volume | 시장 유동성·거래량 — 신호 신뢰도 판단에 활용 |
+
+> **활용**: Polymarket의 확률 추이는 "대중의 추세 파악" 인사이트의 핵심 소스 중 하나.

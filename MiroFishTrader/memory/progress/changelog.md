@@ -6,6 +6,14 @@
 
 ## 2026-06-11
 
+### 프로젝트 범위 명확화
+
+- **결정**: 프로젝트 목적·범위를 구체화하여 문서 갱신
+- **목적**: MiroFish 오픈소스로 투자 인사이트 도출 → 보고서 생성 → **매일 오전 Slack 또는 Gmail로 전달**
+- **투자 인사이트 2가지**: (1) 신규 종목 발견 (2) 대중의 추세 파악
+- **투자 대상 시장**: Polymarket(예측시장), ETF 시장
+- **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
+
 ### MiroFish-Offline 프로젝트 제거
 
 - **결정**: `MiroFish-Offline/` 디렉토리 및 관련 메모리 문서 전부 제거
