@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:3000 -o /dev/null -w \"%{http_code}\")",
+      "Bash(curl -s http://localhost:5001/api/graph/status)",
+      "Bash(curl -s http://localhost:5001/api/simulation/status)",
+      "Bash(curl -s http://localhost:5001/api/simulation/list)",
+      "Bash(curl -s http://localhost:5001/api/simulation/entities/4d88bdb8-2cdf-4016-8565-b6cbf7ebb336)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('총 엔티티:', d['data']['total']\\); [print\\(f\\\\\"- {e['name']} \\({e['labels'][0]}\\)\\\\\"\\) for e in d['data']['entities']]\")"
+    ]
+  }
+}

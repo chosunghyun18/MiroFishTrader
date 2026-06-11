@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-06-11
+
+### MiroFish-Offline 프로젝트 제거
+
+- **결정**: `MiroFish-Offline/` 디렉토리 및 관련 메모리 문서 전부 제거
+- **배경**: MiroFish-Offline(멀티에이전트 시뮬레이션 엔진, Flask+Neo4j+Ollama+CAMEL-AI)은 ETF→Slack 리포트 서비스인 본 프로젝트와 **별개 프로젝트**로 확인됨. 한 폴더에 함께 있었을 뿐 의존 관계 없음
+- **조치**:
+  - `MiroFish-Offline/` 삭제 (git에서도 제거)
+  - `memory/architecture/mirofish-offline.md` 삭제
+  - `memory/INDEX.md`에서 해당 링크 제거
+- **백업**: 삭제 직전 미커밋 변경분 포함 `MiroFish-Offline-backup-20260611-140042.tar.gz`로 보관 (복구 필요 시 사용)
+
+---
+
 ## 2026-04-19
 
 ### 프로젝트 초기화

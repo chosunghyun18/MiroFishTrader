@@ -10,7 +10,6 @@
 | 문서 | 설명 |
 |------|------|
 | [architecture/overview.md](architecture/overview.md) | 전체 시스템 컴포넌트 및 데이터 흐름 |
-| [architecture/mirofish-offline.md](architecture/mirofish-offline.md) | MiroFish-Offline 로컬 시뮬레이션 엔진 — Flask+Neo4j+Ollama+CAMEL-AI, 5단계 워크플로우 |
 
 ---
 
