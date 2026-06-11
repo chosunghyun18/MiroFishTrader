@@ -4,6 +4,9 @@
 
 themes:
   semiconductors: [SOXX, SMH]
+  chip: [SOXX, SMH]
+  chips: [SOXX, SMH]
+  chip sector: [SOXX, SMH]
   반도체: [SOXX, SMH]
   ai: [BOTZ, AIQ]
   rates: [TLT, IEF]

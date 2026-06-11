@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -72,13 +73,22 @@ def filter_markets(
     *,
     max_results: int = 5,
 ) -> List[PolymarketMarket]:
-    """질문 텍스트에 키워드가 포함된 마켓만 (입력 순서=거래량순 유지)."""
-    kws = [k.strip().lower() for k in keywords if k.strip()]
+    """질문에 키워드가 '단어 단위'로 포함된 마켓만 (입력 순서=거래량순 유지).
+
+    부분 문자열이 아닌 단어 경계 매칭을 써서 짧은 키워드(예: "ai")가
+    "Spain", "Strait" 같은 단어에 잘못 걸리는 것을 방지한다.
+    """
+    patterns = [
+        re.compile(r"\b" + re.escape(k.strip()) + r"\b", re.IGNORECASE)
+        for k in keywords
+        if k.strip()
+    ]
     out: List[PolymarketMarket] = []
     seen: set[str] = set()
     for m in markets:
-        q = m.question.lower()
-        if m.question and m.question not in seen and any(kw in q for kw in kws):
+        if not m.question or m.question in seen:
+            continue
+        if any(p.search(m.question) for p in patterns):
             seen.add(m.question)
             out.append(m)
         if len(out) >= max_results:

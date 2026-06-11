@@ -14,6 +14,14 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### v1 라이브 검증 완료 + Polymarket 매칭 품질 수정
+
+- **라이브 검증**: Mac(M2)에서 Ollama `qwen2.5:7b`로 end-to-end 성공 — 추세 bullish 80%, 테마 semiconductors/AI/rates, 티커 SOXX·SMH·NVDA, Slack 전송 완료
+- **셋업 이슈 해결**: `.env` 파이썬 자동 로드 버그 수정, 모델 14b→7b(M2 VRAM 10.7GB 적합), Ollama 서버 기동 순서 정리
+- **품질 버그 수정**: Polymarket 키워드가 부분 문자열 매칭이라 짧은 키워드 `ai`가 "Sp**ai**n"·"Str**ai**t"에 오매칭 → **단어 경계(\b) 매칭**으로 변경. 무관한 스포츠/정치 마켓 제거, Fed 금리 마켓 등 관련만 유지
+- **사전 보강**: `chip`/`chips`/`chip sector` → SOXX/SMH 추가 (매핑 miss 로그 반영)
+- **테스트**: 30개 통과 (단어경계 케이스 추가)
+
 ### 시장데이터 소스 결정 (v2 작업 예정)
 
 - **결정**: 시장 데이터 fetcher 소스를 **Stooq(1순위) + Alpha Vantage/Finnhub(fallback)**로 확정. 매크로는 FRED

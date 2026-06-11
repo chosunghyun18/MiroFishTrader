@@ -72,3 +72,14 @@ def test_find_markets_handles_fetch_error():
 def test_find_markets_max_results():
     res = find_markets(["will"], FakeClient(RAW_MARKETS), max_results=1)
     assert len(res) == 1
+
+
+def test_word_boundary_avoids_substring_false_match():
+    markets = [
+        {"question": "Will Spain win the World Cup?", "slug": "spain", "outcomePrices": ["0.2", "0.8"]},
+        {"question": "Latest AI breakthrough by 2027?", "slug": "ai", "outcomePrices": ["0.5", "0.5"]},
+    ]
+    res = find_markets(["ai"], FakeClient(markets))
+    questions = [m.question for m in res]
+    assert "Latest AI breakthrough by 2027?" in questions  # 단어 AI 매칭
+    assert "Will Spain win the World Cup?" not in questions  # Sp-ai-n 오매칭 방지
