@@ -14,6 +14,13 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### MiroFish 인사이트 연동 방식 확정
+
+- **결정**: MiroFish 인사이트 연동을 **파일 기반 배치**로 확정 (REST API 오케스트레이션 미채택)
+- **이유**: MiroFish는 Neo4j+Ollama 필요한 무거운 로컬 스택 → 상시 구동 대신 일일 배치가 비용·구조 면에서 유리, 두 프로젝트 결합도 최소화
+- **계약**: 공유 폴더(`shared/mirofish/`)의 리포트 JSON 파일을 MiroFishTrader가 소비. MiroFish의 Step4 `sentiment_trend`가 "대중 추세" 신호의 핵심 소스
+- **신규 문서**: `architecture/mirofish-integration.md`
+
 ### MiroFish-Offline 프로젝트 제거
 
 - **결정**: `MiroFish-Offline/` 디렉토리 및 관련 메모리 문서 전부 제거
