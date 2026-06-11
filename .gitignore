@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 환경/시크릿
+.env
+
+# 런타임 데이터 (MiroFish 공유 폴더 등)
+shared/
+
+# 백업 아카이브 (로컬 보관용, 버전관리 제외)
+*.tar.gz
