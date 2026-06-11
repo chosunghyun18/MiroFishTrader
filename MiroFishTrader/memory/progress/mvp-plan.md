@@ -16,7 +16,7 @@
 - 매일 오전 스케줄
 
 **제외 (v2 이후)**
-- Yahoo Finance / FRED 시장 데이터
+- 시장 데이터 fetcher — **Stooq(1순위, 무료·무가입) + Alpha Vantage/Finnhub fallback**, 매크로는 FRED. (Yahoo `yfinance`는 비공식·불안정으로 미채택)
 - 시드 생성 + MiroFish 배치 자동 트리거 (리포트 파일은 이미 있다고 가정)
 - Gmail, 캐싱, stale 정밀 처리, 티커 자동 리졸버
 

@@ -14,6 +14,14 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### 시장데이터 소스 결정 (v2 작업 예정)
+
+- **결정**: 시장 데이터 fetcher 소스를 **Stooq(1순위) + Alpha Vantage/Finnhub(fallback)**로 확정. 매크로는 FRED
+- **이유**: 용도가 "ETF 몇 개의 EOD 가격·등락을 하루 1회"라 무료·무가입·소량이면 충분. Stooq는 키·가입 없이 CSV로 EOD 제공(비용 0). Yahoo `yfinance`는 비공식 스크래핑으로 rate-limit·IP 차단·누락이 잦아 일일 배치 부적합
+- **국내**: KRX 필요 시 pykrx 또는 Stooq 한국 티커
+- **반영**: `architecture/overview.md` 데이터소스, `progress/mvp-plan.md` v2 항목
+- **다음 작업**: `src/fetcher.py` — Stooq EOD 조회 + AlphaVantage/Finnhub fallback (v2)
+
 ### MVP v1 전체 구현 완료
 
 - **구현**: report_store → mapper → polymarket → reporter → slack → pipeline → 스케줄 (7개 모두)

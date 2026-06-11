@@ -46,9 +46,14 @@ MiroFish 오픈소스로 도출한 투자 인사이트를 바탕으로 보고서
 |------|------|------|
 | MiroFish 오픈소스 | 로컬/무료 | 대중 여론·심리 추세 인사이트 |
 | Polymarket API | 무료 | 예측시장 확률/추세 |
-| Yahoo Finance (`yfinance`) | 무료 | ETF 가격, 거래량 |
+| **Stooq** (1순위) | 무료·무가입 | ETF EOD 가격/등락 (CSV 한 줄) |
+| Alpha Vantage / Finnhub (fallback) | 무료 키 | ETF 가격 JSON, 풍부한 fallback |
 | FRED API | 무료 | 매크로 지표 (금리, CPI 등) |
 | FinViz | 무료 (스크래핑) | ETF 스크리닝 / 신규 종목 발견 |
+
+> ⚠️ Yahoo Finance(`yfinance`)는 비공식 스크래핑으로 rate-limit·IP 차단·데이터 누락이
+> 잦아 일일 배치에 부적합 → **Stooq 1순위 + Alpha Vantage/Finnhub fallback**으로 결정.
+> 국내(KRX) 필요 시 pykrx 또는 Stooq 한국 티커.
 
 ---
 
