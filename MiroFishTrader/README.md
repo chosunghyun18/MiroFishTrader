@@ -25,8 +25,18 @@ MiroFish 리포트(out/latest.json)
 ## 설치
 
 ```bash
-pip install -r requirements.txt
 cp .env.example .env   # 값 채우기 (특히 SLACK_WEBHOOK_URL)
+
+# Python 의존성 + Ollama 설치 + 모델 pull 을 한 번에
+bash scripts/setup.sh
+```
+
+수동으로 하려면:
+
+```bash
+pip install -r requirements.txt
+# Ollama: https://ollama.com/download 설치 후
+ollama pull qwen2.5:14b
 ```
 
 ## 실행
