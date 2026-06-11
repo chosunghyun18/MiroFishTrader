@@ -1,0 +1,17 @@
+# 테마/엔티티 → 티커 정적 매핑 (v1: 수동 시드, 점진 확장)
+# 매칭 실패 키워드는 로그로 남겨 여기에 보강한다.
+
+themes:
+  반도체: [SOXX, SMH]
+  AI: [BOTZ, AIQ]
+  금리: [TLT, IEF]
+  에너지: [XLE]
+  헬스케어: [XLV]
+  금융: [XLF]
+  빅테크: [QQQ, XLK]
+
+entities:
+  NVIDIA: NVDA
+  Apple: AAPL
+  Microsoft: MSFT
+  Tesla: TSLA

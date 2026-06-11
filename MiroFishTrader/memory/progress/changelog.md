@@ -14,6 +14,18 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### 구현 착수 — 추출 레이어 (첫 코드)
+
+- **결정**: 가장 자립적인 추출 레이어부터 구현 시작
+- **추가 파일**:
+  - `src/models.py` — `ExtractedSignal`/`EntitySentiment` + 방어적 `from_raw` 검증
+  - `src/llm.py` — `OllamaClient` (OpenAI 호환), `SupportsComplete` 프로토콜로 DI
+  - `src/extractor.py` — `build_prompt`/`extract_signal`, 코드펜스·잡텍스트 허용 JSON 파싱
+  - `config/ticker_map.yaml`, `requirements.txt`, `.env.example`
+  - `tests/test_extractor.py` — FakeLLM 기반 9개 테스트 (전부 통과)
+- **검증**: `python -m pytest tests/` → 9 passed. LLM 없이 추출/검증 로직 커버 (코드펜스 제거, trend 강제, confidence 클램프, 엔티티 정제, 파싱 실패 처리)
+- **다음**: 티커 매핑 모듈(`mapper.py`) → Analyzer → Slack sender → 일일 배치 오케스트레이션
+
 ### 추출 레이어·매핑·전달 채널 확정
 
 - **추출 출력 스키마 (확정)**: 플랫 구조 `{date, source_report_id, trend_direction(bullish/bearish/neutral), confidence(0~1), themes[], entities[{name, sentiment}], summary}`

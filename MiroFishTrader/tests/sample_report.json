@@ -1,0 +1,25 @@
+{
+  "report_id": "rep_test_0001",
+  "simulation_id": "sim_test_0001",
+  "graph_id": "graph_test_0001",
+  "simulation_requirement": "반도체 섹터에 대한 시장 심리 시뮬레이션",
+  "status": "completed",
+  "outline": {
+    "title": "Semiconductor Sentiment Forecast",
+    "summary": "Agents broadly expect continued upside in semiconductors driven by AI demand.",
+    "sections": [
+      {
+        "title": "Crowd Direction",
+        "content": "Most simulated agents posted bullish views on NVIDIA and the broader chip sector, citing sustained AI infrastructure spending."
+      },
+      {
+        "title": "Risks",
+        "content": "A minority raised concerns about rate sensitivity and stretched valuations."
+      }
+    ]
+  },
+  "markdown_content": "# Semiconductor Sentiment Forecast\n\n> Agents broadly expect continued upside in semiconductors driven by AI demand.\n\n## Crowd Direction\n\nMost simulated agents posted bullish views on NVIDIA and the broader chip sector, citing sustained AI infrastructure spending.\n\n## Risks\n\nA minority raised concerns about rate sensitivity and stretched valuations.\n",
+  "created_at": "2026-06-11T06:00:00",
+  "completed_at": "2026-06-11T06:08:00",
+  "error": null
+}
