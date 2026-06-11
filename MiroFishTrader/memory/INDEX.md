@@ -19,6 +19,7 @@
 | 문서 | 설명 |
 |------|------|
 | [progress/changelog.md](progress/changelog.md) | 날짜별 변경사항 및 의사결정 로그 |
+| [progress/mvp-plan.md](progress/mvp-plan.md) | MVP v1 구현 계획 — 범위·파이프라인·작업목록·완료기준 |
 
 ---
 

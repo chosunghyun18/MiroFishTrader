@@ -14,6 +14,15 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### MVP v1 범위 확정 + 작업 계획
+
+- **결정**: "최소한으로 빠르게" 원칙으로 v1 범위 확정
+- **v1 포함**: MiroFish 추출 신호(✅) + 티커 매핑 + **Polymarket 예측시장 확률** + Slack 전송 + 매일 오전 스케줄
+- **v1 제외**: Yahoo/FRED 시장데이터, 시드 생성·MiroFish 배치 트리거, Gmail, 캐싱
+- **작업 목록(7개)**: report_store → mapper → polymarket → reporter → slack → pipeline → 스케줄
+- **신규 문서**: `progress/mvp-plan.md` (범위·파이프라인·완료기준)
+- **주의**: Polymarket이 유일한 비자명 조각 — 구현 시 실제 API 1회 검증 필요
+
 ### 구현 착수 — 추출 레이어 (첫 코드)
 
 - **결정**: 가장 자립적인 추출 레이어부터 구현 시작
