@@ -14,3 +14,6 @@ shared/
 
 # 백업 아카이브 (로컬 보관용, 버전관리 제외)
 *.tar.gz
+
+# MiroFish 업스트림 (별도 외부 도구 — work repo가 추적하지 않음)
+/MiroFish/
