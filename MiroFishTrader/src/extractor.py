@@ -23,14 +23,16 @@ Return ONLY a JSON object (no prose, no code fences) with EXACTLY this shape:
   "confidence": 0.0,
   "themes": ["short theme keyword", "..."],
   "entities": [{{"name": "Entity", "sentiment": "positive | negative | neutral"}}],
-  "summary": "one-line summary"
+  "summary": "한 줄 요약 (Korean)"
 }}
 
 Rules:
+- The report may be written in Chinese or another language; still produce the fields below.
 - trend_direction: overall crowd/market direction implied by the report.
 - confidence: 0.0-1.0, how strongly the report supports that direction.
 - themes: 1-6 concise sector/topic keywords, IN ENGLISH (e.g. "semiconductors", "rates").
-- entities: named companies/assets mentioned, with per-entity sentiment.
+- entities: named companies/assets mentioned, names IN ENGLISH, with per-entity sentiment.
+- summary: one concise line summarizing the report, IN KOREAN (한국어).
 - Output valid JSON only.
 
 REPORT:
