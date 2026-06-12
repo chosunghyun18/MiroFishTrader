@@ -36,6 +36,19 @@ from .seed import generate_seed
 logger = logging.getLogger(__name__)
 
 
+def _progress_str(data: Dict[str, Any]) -> str:
+    """폴링 데이터에서 사람이 읽을 진행률 문자열 추출."""
+    if "progress_percent" in data:  # 시뮬레이션 실행
+        return (
+            f"{data.get('current_round', 0)}/{data.get('total_rounds', '?')} 라운드 "
+            f"({data.get('progress_percent', 0)}%)"
+        )
+    if "progress" in data:  # 비동기 태스크 (빌드/리포트)
+        msg = data.get("message", "")
+        return f"{data.get('progress', 0)}%{' — ' + msg if msg else ''}"
+    return str(data.get("status") or data.get("runner_status") or "...")
+
+
 class MiroFishRunner:
     """MiroFish 백엔드를 단계별로 구동하는 오케스트레이터."""
 
@@ -73,7 +86,7 @@ class MiroFishRunner:
                 return data
             if fail(data):
                 raise MiroFishError(f"{label} 실패: {data}")
-            logger.info("%s 진행 중... (%s)", label, data.get("status") or data.get("runner_status"))
+            logger.info("%s 진행 중... %s", label, _progress_str(data))
             self._sleep(self.poll_interval)
         raise MiroFishError(f"{label} 타임아웃 ({self.poll_timeout}s)")
 

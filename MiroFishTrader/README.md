@@ -39,17 +39,33 @@ pip install -r requirements.txt
 ollama pull qwen2.5:14b
 ```
 
-## 실행
+## 원할 때 리포트 받기 (한 명령)
+
+서버 기동 → 준비 확인 → MiroFish 5단계 → Slack 전송까지 한 번에. 진행률이 로그로 표시된다.
 
 ```bash
-# 전송 없이 페이로드만 확인
-python -m src.pipeline --dry-run
-
-# 실제 Slack 전송
-python -m src.pipeline
+bash scripts/report.sh                 # 전체 자동 (기본 max_rounds=10)
+bash scripts/report.sh --max-rounds 5  # 더 빠르게 (가벼운 시뮬)
 ```
 
-전제: MiroFish 배치가 `MIROFISH_SHARED_DIR/out/latest.json`을 미리 생성. 추출에는 로컬 Ollama가 필요하다(미실행 시 중립 신호로 degrade).
+보조 스크립트:
+
+```bash
+bash scripts/check.sh   # 서버(Ollama/MiroFish/모델) 준비 상태만 확인
+bash scripts/up.sh      # 서버만 기동 + 준비 대기
+```
+
+> 시뮬레이션은 M2에서 수 분~십수 분 걸린다. `report.sh` 실행 중 단계별 진행률(라운드/%)이 출력된다.
+
+## 실행 (개별 단계)
+
+```bash
+python -m src.mirofish_runner --max-rounds 10   # MiroFish 5단계 → latest.json
+python -m src.pipeline --dry-run                # 전송 없이 신호 확인
+python -m src.pipeline                           # 실제 Slack 전송
+```
+
+추출에는 로컬 Ollama가 필요하다(미실행 시 중립 신호로 degrade).
 
 ## 매일 오전 자동 실행
 

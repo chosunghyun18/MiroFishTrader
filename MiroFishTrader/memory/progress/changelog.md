@@ -14,6 +14,17 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### 온디맨드 실행 UX — 서버 기동·체크·진행률
+
+- **라이브 검증 완료**: `mirofish_runner` 실제 백엔드에서 완주(report 생성→latest.json), pipeline→Slack 도착 확인
+- **언어 정정**: MiroFish 리포트가 중국어로 나와 추출 프롬프트에 "요약 한국어/엔티티 영어" 강제 추가
+- **신규 스크립트**:
+  - `scripts/check.sh` — Ollama/MiroFish/모델 준비 상태 확인
+  - `scripts/up.sh` — 서버 기동(open -a Ollama / docker compose up) + 준비 대기(health poll)
+  - `scripts/report.sh` — **한 명령**: up → run_daily(러너+파이프라인)
+- **진행률**: 러너 폴링 로그에 `_progress_str`로 라운드/% 및 태스크 진행률 표시
+- **README**: "원할 때 리포트 받기(한 명령)" 섹션 추가
+
 ### MiroFish④ 5단계 헤드리스 러너 구현 (전체 자동화 완성)
 
 - **②배포 완료**: 업스트림 MiroFish를 work/MiroFish로 이동(.git 제거, gitignore), Ollama+Zep .env로 Docker 기동 — :3000/:5001 동작 확인
