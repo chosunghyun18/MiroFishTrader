@@ -14,6 +14,14 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### 문서 정리 — v1 완료 반영
+
+- **신규**: `architecture/implementation.md` — 실제 빌드된 시스템(모듈 맵·흐름·실행명령·의존). 최신 진입점
+- **갱신**: `overview.md` 상태 "미구현"→"v1 완료", 컴포넌트 표를 실제 모듈/상태로 교체
+- **갱신**: `mvp-plan.md` DoD 체크 완료, 당초 v2였던 시드·러너가 v1에 포함됐음 명시
+- **수정**: `INDEX.md` 깨진 mirofish-setup 링크 수정 + implementation.md 추가
+- 한국어 요약 정규화 라이브 확인(추세 bullish 80%, 한국어 요약 정상 출력)
+
 ### 온디맨드 실행 UX — 서버 기동·체크·진행률
 
 - **라이브 검증 완료**: `mirofish_runner` 실제 백엔드에서 완주(report 생성→latest.json), pipeline→Slack 도착 확인

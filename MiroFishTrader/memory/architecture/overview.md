@@ -1,7 +1,8 @@
 # Architecture Overview
 
-> 최종 업데이트: 2026-06-11
-> 상태: 초기 설계 단계 (미구현)
+> 최종 업데이트: 2026-06-12
+> 상태: **v1 구현·라이브 검증 완료** — 실제 빌드 상세는 [implementation.md](implementation.md) 참조
+> (이 문서는 상위 설계/데이터소스 관점. 실제 모듈·흐름은 implementation.md가 최신)
 
 ---
 
@@ -17,26 +18,25 @@ MiroFish 오픈소스로 도출한 투자 인사이트를 바탕으로 보고서
 
 ---
 
-## 컴포넌트 (미확정, 설계 예정)
+## 컴포넌트 (v1 구현 상태)
 
 ```
-[MiroFish 인사이트]  ┐
-[시장/매크로 데이터]  ┼→ [분석/신호 생성] → [리포트 빌더] → [전달: Slack / Gmail]
-[Polymarket 데이터]  ┘         ↑
-                          [캐시 레이어]
-                          ↑
-                    [매일 오전 스케줄러]
+[MiroFish 시뮬레이션] → latest.json → [추출 신호화] → [티커 매핑]   ┐
+                                                    [Polymarket]  ┼→ [리포트] → [Slack]
 ```
 
-| 컴포넌트 | 역할 | 상태 | 파일 경로 |
-|----------|------|------|-----------|
-| MiroFish Insight Source | 멀티에이전트 시뮬레이션으로 대중 추세 인사이트 도출 (외부 오픈소스) | 미연동 | 외부 |
-| Data Fetcher | Yahoo Finance / FRED / Polymarket 데이터 수집 | 미구현 | `src/fetcher.py` (예정) |
-| Analyzer | 신규 종목 발견 + 추세 신호 생성 | 미구현 | `src/analyzer.py` (예정) |
-| Report Builder | 인사이트 → 리포트 포맷팅 | 미구현 | `src/reporter.py` (예정) |
-| Slack Sender | Webhook으로 전송 | 미구현 | `src/slack.py` (예정) |
-| Gmail Sender | 이메일로 전송 | 미구현 | `src/gmail.py` (예정) |
-| Scheduler | 매일 오전 정기 실행 | 미결정 | TBD |
+| 컴포넌트 | 역할 | 상태 | 파일 |
+|----------|------|------|------|
+| MiroFish Insight Source | 멀티에이전트 시뮬레이션으로 추세 인사이트 도출 | ✅ 연동 | 외부 + `mirofish_runner.py` |
+| Seed Generator | 시드 문서 생성 | ✅ 구현 | `src/seed.py` |
+| Extractor | 리포트 산문 → 구조화 신호 | ✅ 구현 | `src/extractor.py` |
+| Mapper | themes/entities → 티커 | ✅ 구현 | `src/mapper.py` |
+| Polymarket | 예측시장 확률 | ✅ 구현 | `src/polymarket.py` |
+| Report Builder | Slack 메시지 조립 | ✅ 구현 | `src/reporter.py` |
+| Slack Sender | Webhook 전송 | ✅ 구현 | `src/slack.py` |
+| Data Fetcher (시장데이터) | Stooq/AlphaVantage | ⬜ v2 | `src/fetcher.py` (예정) |
+| Gmail Sender | 이메일 전송 | ⬜ v2 | (예정) |
+| Scheduler | 매일 오전 cron | ⬜ 보류 | `scripts/run_daily.sh` 준비됨 |
 
 ---
 

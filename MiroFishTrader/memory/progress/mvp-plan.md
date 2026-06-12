@@ -1,8 +1,11 @@
 # MVP v1 구현 계획
 
-> 최종 업데이트: 2026-06-11
-> 목표: **매일 오전 Slack으로 MiroFish 인사이트 + Polymarket 기반 투자 리포트 수신**
-> 원칙: 최소한으로 빠르게. 동작하는 end-to-end 수직 슬라이스 우선.
+> 최종 업데이트: 2026-06-12
+> **상태: ✅ v1 완료 (라이브 검증됨)** — 실제 구현은 [../architecture/implementation.md](../architecture/implementation.md)
+> 목표: 매일 오전 Slack으로 MiroFish 인사이트 + Polymarket 기반 투자 리포트 수신
+>
+> 참고: 당초 v2로 미뤘던 시드 생성·MiroFish 배치 트리거(④/⑤)도 v1에서 함께 구현됨.
+> 즉 "리포트 파일이 이미 있다고 가정"하지 않고 MiroFish 5단계를 직접 자동 구동한다.
 
 ---
 
@@ -64,7 +67,8 @@ out/latest.json
 
 ## 완료 기준 (Definition of Done)
 
-- `python -m src.pipeline` 실행 시: 샘플 `latest.json`으로 Slack 채널에 리포트 1건 도착
-- MiroFish 리포트 없거나 Polymarket 실패해도 크래시 없이 부분 리포트 전송
-- 전체 단위 테스트 통과
-- cron 등록으로 매일 오전 자동 실행
+- [x] `python -m src.pipeline` 실행 시 Slack 채널에 리포트 도착 (실데이터로 검증)
+- [x] MiroFish 리포트 없거나 Polymarket 실패해도 크래시 없이 부분 리포트 전송
+- [x] 전체 단위 테스트 통과 (43개)
+- [x] 한 명령 실행 (`scripts/report.sh`) + 진행률 표시
+- [ ] cron 등록으로 매일 오전 자동 실행 (**보류** — 사용자 요청)

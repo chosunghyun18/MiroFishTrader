@@ -9,9 +9,10 @@
 
 | 문서 | 설명 |
 |------|------|
-| [architecture/overview.md](architecture/overview.md) | 전체 시스템 컴포넌트 및 데이터 흐름 |
-| [architecture/mirofish-integration.md](architecture/mirofish-integration.md) | MiroFish 인사이트 연동 설계 — 파일 기반 배치, 공유폴더 계약, 종목 매핑 |
-| [architecture/](architecture/mirofish-setup.md) | MiroFish 생산자 셋업 — 업스트림 + Ollama + Zep 무료, 리포트 export |
+| [architecture/implementation.md](architecture/implementation.md) | **★ 실제 빌드된 시스템** — 모듈 맵·흐름·실행명령·의존 (최신 진입점) |
+| [architecture/overview.md](architecture/overview.md) | 상위 설계 관점 — 컴포넌트 상태, 데이터 소스 |
+| [architecture/mirofish-integration.md](architecture/mirofish-integration.md) | MiroFish 연동 설계 — 파일 기반 배치, 공유폴더 계약, 추출 스키마, 종목 매핑 |
+| [architecture/mirofish-setup.md](architecture/mirofish-setup.md) | MiroFish 생산자 셋업 — 업스트림 + Ollama + Zep 무료 |
 
 ---
 
