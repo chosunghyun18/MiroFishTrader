@@ -14,6 +14,20 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### MiroFish 버전 결정 — 업스트림 + Ollama + Zep 무료
+
+- **결정**: 리포트 생산자로 **업스트림 `666ghj/MiroFish`** 채택. LLM은 로컬 Ollama로 우회(OpenAI SDK 호환), 메모리는 Zep Cloud 무료 티어
+- **정정**: 업스트림이 "유료"라던 초기 평가 수정 — LLM을 Ollama로 바꾸면 API 요금 0, Zep 무료 티어가 저volume에 충분. 남는 비용은 시뮬 컴퓨팅뿐
+- **Offline 포크 대신 업스트림 이유**: 유지보수됨 + Neo4j 불필요. 대가로 Zep 가입·데이터 일부 외부 전송
+- **신규 문서**: `architecture/mirofish-setup.md` (클론·.env·Docker·리포트 export)
+- **MiroFish 연동 작업 재정의 (①완료, ②~⑥ 진행)**:
+  - ① 버전 선택 ✅
+  - ② 업스트림 배포·실행 (Ollama+Zep, Docker)
+  - ③ 시드 생성 로직
+  - ④ 5단계 워크플로우 헤드리스 자동화 (API 러너)
+  - ⑤ 리포트 export → `shared/out/latest.json`
+  - ⑥ 컴퓨팅(제약, 라운드 수 조절)
+
 ### v1 라이브 검증 완료 + Polymarket 매칭 품질 수정
 
 - **라이브 검증**: Mac(M2)에서 Ollama `qwen2.5:7b`로 end-to-end 성공 — 추세 bullish 80%, 테마 semiconductors/AI/rates, 티커 SOXX·SMH·NVDA, Slack 전송 완료

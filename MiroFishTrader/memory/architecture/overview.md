@@ -44,7 +44,7 @@ MiroFish 오픈소스로 도출한 투자 인사이트를 바탕으로 보고서
 
 | 소스 | 비용 | 용도 |
 |------|------|------|
-| MiroFish 오픈소스 | 로컬/무료 | 대중 여론·심리 추세 인사이트 |
+| MiroFish (업스트림 + Ollama + Zep무료) | 거의 무료 | 대중 여론·심리 추세 인사이트 (→ mirofish-setup.md) |
 | Polymarket API | 무료 | 예측시장 확률/추세 |
 | **Stooq** (1순위) | 무료·무가입 | ETF EOD 가격/등락 (CSV 한 줄) |
 | Alpha Vantage / Finnhub (fallback) | 무료 키 | ETF 가격 JSON, 풍부한 fallback |

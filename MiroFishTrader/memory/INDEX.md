@@ -11,6 +11,7 @@
 |------|------|
 | [architecture/overview.md](architecture/overview.md) | 전체 시스템 컴포넌트 및 데이터 흐름 |
 | [architecture/mirofish-integration.md](architecture/mirofish-integration.md) | MiroFish 인사이트 연동 설계 — 파일 기반 배치, 공유폴더 계약, 종목 매핑 |
+| [architecture/mirofish-setup.md](architecture/mirofish-setup.md) | MiroFish 생산자 셋업 — 업스트림 + Ollama + Zep 무료, 리포트 export |
 
 ---
 
