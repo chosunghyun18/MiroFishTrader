@@ -14,6 +14,13 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### MiroFish③ 시드 생성기 구현 + 코드 점검
+
+- **코드 점검**: 전 모듈 컴파일 OK, pyflakes 클린, 각 50~140줄. 발견된 갭 — ④ 러너 부재로 export↔pipeline 미연결(예상된 상태)
+- **신규 모듈**: `src/seed.py` — Polymarket 금융 마켓 + 워치리스트 → 시드 마크다운(`<shared>/in/seed-YYYYMMDD.md`) + 예측 요구사항 문자열 생성. Polymarket 클라이언트 재사용
+- **테스트**: 40개 통과 (seed 5개 추가)
+- **MiroFish 작업 현황**: ①✅ ③✅ ⑤✅ / ② 배포(사용자) · ④ 5단계 러너(라이브 인스턴스 필요) 잔여
+
 ### MiroFish⑤ 리포트 export 구현 + API 봉투 확인
 
 - **업스트림 API 확인**: `GET /api/report/{id}`·`/by-simulation/{sim_id}`가 리포트를 **`{success, data:{...}}` 봉투**로 반환. data 내부가 outline/markdown_content/report_id… → 우리 파이프라인 스키마와 일치 확인
