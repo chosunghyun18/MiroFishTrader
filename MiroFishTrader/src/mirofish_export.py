@@ -39,9 +39,8 @@ class MiroFishClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def get_json(self, path: str) -> Dict[str, Any]:
+    def _as_dict(self, resp: requests.Response, path: str) -> Dict[str, Any]:
         try:
-            resp = requests.get(f"{self.base_url}{path}", timeout=self.timeout)
             resp.raise_for_status()
             data = resp.json()
         except (requests.RequestException, ValueError) as exc:
@@ -49,6 +48,33 @@ class MiroFishClient:
         if not isinstance(data, dict):
             raise MiroFishError(f"MiroFish 응답이 객체가 아님 ({path})")
         return data
+
+    def get_json(self, path: str) -> Dict[str, Any]:
+        try:
+            resp = requests.get(f"{self.base_url}{path}", timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise MiroFishError(f"MiroFish GET 실패 ({path}): {exc}") from exc
+        return self._as_dict(resp, path)
+
+    def post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            resp = requests.post(
+                f"{self.base_url}{path}", json=payload, timeout=self.timeout
+            )
+        except requests.RequestException as exc:
+            raise MiroFishError(f"MiroFish POST 실패 ({path}): {exc}") from exc
+        return self._as_dict(resp, path)
+
+    def post_files(
+        self, path: str, *, files: Dict[str, Any], data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        try:
+            resp = requests.post(
+                f"{self.base_url}{path}", files=files, data=data, timeout=self.timeout
+            )
+        except requests.RequestException as exc:
+            raise MiroFishError(f"MiroFish 업로드 실패 ({path}): {exc}") from exc
+        return self._as_dict(resp, path)
 
 
 def _unwrap(envelope: Dict[str, Any]) -> Dict[str, Any]:

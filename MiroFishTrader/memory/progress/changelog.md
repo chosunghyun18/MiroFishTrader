@@ -14,6 +14,16 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### MiroFish④ 5단계 헤드리스 러너 구현 (전체 자동화 완성)
+
+- **②배포 완료**: 업스트림 MiroFish를 work/MiroFish로 이동(.git 제거, gitignore), Ollama+Zep .env로 Docker 기동 — :3000/:5001 동작 확인
+- **실제 API 리버스 엔지니어링**: work/MiroFish 백엔드 소스 직독으로 엔드포인트·요청형식 확정 (시드는 `/api/graph/ontology/generate`에 multipart 업로드)
+- **신규 모듈**: `src/mirofish_runner.py` — 6단계 오케스트레이션(온톨로지→빌드→create→prepare→start→report) + 폴링, 끝에 `latest.json` 저장. 상태값: task `completed/failed`, runner `completed/failed/stopped`, prepare `ready/completed`
+- **클라이언트 확장**: `MiroFishClient`에 post_json/post_files 추가
+- **일일 스크립트**: `run_daily.sh`가 러너→파이프라인 체이닝 (러너 실패 시 직전 리포트로 degrade)
+- **테스트**: 43개 통과 (러너 전체흐름·폴링·실패 케이스 FakeClient로 검증)
+- **⚠️ 라이브 검증 필요**: 폴링 상태문자열 가정은 첫 실제 실행에서 미세조정 가능
+
 ### MiroFish③ 시드 생성기 구현 + 코드 점검
 
 - **코드 점검**: 전 모듈 컴파일 OK, pyflakes 클린, 각 50~140줄. 발견된 갭 — ④ 러너 부재로 export↔pipeline 미연결(예상된 상태)

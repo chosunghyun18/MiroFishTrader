@@ -13,4 +13,8 @@ if [ -f .env ]; then
   set +a
 fi
 
-exec python3 -m src.pipeline "$@"
+# 1) MiroFish 5단계 실행 → shared/out/latest.json (실패해도 계속: 직전 리포트로 degrade)
+python3 -m src.mirofish_runner "$@" || echo "WARN: MiroFish 러너 실패 — 직전 latest.json으로 진행"
+
+# 2) 추출 → 매핑 → Polymarket → Slack 전송
+exec python3 -m src.pipeline
