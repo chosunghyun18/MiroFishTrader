@@ -14,6 +14,14 @@
 - **투자 대상 시장**: Polymarket(예측시장), ETF 시장
 - **갱신 문서**: CLAUDE.md, architecture/overview.md, concepts/etf-glossary.md(Polymarket 용어 추가)
 
+### MiroFish⑤ 리포트 export 구현 + API 봉투 확인
+
+- **업스트림 API 확인**: `GET /api/report/{id}`·`/by-simulation/{sim_id}`가 리포트를 **`{success, data:{...}}` 봉투**로 반환. data 내부가 outline/markdown_content/report_id… → 우리 파이프라인 스키마와 일치 확인
+- **신규 모듈**: `src/mirofish_export.py` — `MiroFishClient`로 리포트 조회 → 봉투 벗김 → `shared/out/latest.json` 저장. CLI `--report-id/--simulation-id`
+- **설정 추가**: `MIROFISH_API_URL`(기본 :5001)
+- **테스트**: 35개 통과 (export 5개 추가, report_store와 왕복 호환 검증)
+- **남은 MiroFish 작업**: ② 배포(사용자 머신), ③ 시드 생성, ④ 5단계 헤드리스 러너(라이브 인스턴스 필요)
+
 ### MiroFish 버전 결정 — 업스트림 + Ollama + Zep 무료
 
 - **결정**: 리포트 생산자로 **업스트림 `666ghj/MiroFish`** 채택. LLM은 로컬 Ollama로 우회(OpenAI SDK 호환), 메모리는 Zep Cloud 무료 티어

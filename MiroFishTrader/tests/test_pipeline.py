@@ -46,6 +46,7 @@ def _settings(shared_dir):
         llm_base_url="x",
         llm_model="x",
         mirofish_shared_dir=str(shared_dir),
+        mirofish_api_url="http://localhost:5001",
         slack_webhook_url="",
         ticker_map_path=str(ROOT / "config" / "ticker_map.yaml"),
     )

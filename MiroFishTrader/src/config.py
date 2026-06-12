@@ -33,6 +33,7 @@ class Settings:
     llm_base_url: str
     llm_model: str
     mirofish_shared_dir: str
+    mirofish_api_url: str
     slack_webhook_url: str
     ticker_map_path: str
 
@@ -43,6 +44,7 @@ class Settings:
             llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
             llm_model=os.getenv("LLM_MODEL_NAME", "qwen2.5:7b"),
             mirofish_shared_dir=os.getenv("MIROFISH_SHARED_DIR", "./shared/mirofish"),
+            mirofish_api_url=os.getenv("MIROFISH_API_URL", "http://localhost:5001"),
             slack_webhook_url=os.getenv("SLACK_WEBHOOK_URL", "").strip(),
             ticker_map_path=os.getenv(
                 "TICKER_MAP_PATH", str(_ROOT / "config" / "ticker_map.yaml")
