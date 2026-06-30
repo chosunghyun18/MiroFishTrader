@@ -32,6 +32,7 @@ from .mirofish_export import (
 )
 from .polymarket import PolymarketClient
 from .seed import generate_seed
+from .sources.news import GdeltClient
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,9 @@ def main() -> None:
 
     settings = Settings.from_env()
     seed_path, requirement = generate_seed(
-        PolymarketClient(), shared_dir=settings.mirofish_shared_dir
+        PolymarketClient(),
+        shared_dir=settings.mirofish_shared_dir,
+        news_client=GdeltClient(),
     )
     logger.info("시드 생성: %s", seed_path)
 

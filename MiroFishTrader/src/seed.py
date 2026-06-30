@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .polymarket import PolymarketMarket, SupportsFetchMarkets, find_markets
+from .sources.news import Headline, SupportsFetchArticles, fetch_headlines
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,10 @@ def _today() -> str:
     return _dt.date.today().isoformat()
 
 
+def _now_utc() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def build_simulation_requirement(watchlist: List[str]) -> str:
     sectors = ", ".join(watchlist)
     return (
@@ -45,9 +50,25 @@ def build_seed_markdown(
     markets: List[PolymarketMarket],
     watchlist: List[str],
     date: str,
+    headlines: Optional[List[Headline]] = None,
+    generated_at: Optional[str] = None,
 ) -> str:
-    lines = [f"# Market Context — {date}", "", "## Focus Sectors"]
+    lines = [
+        f"# Market Context — {date}",
+        "",
+        f"> Data as of {generated_at or date} — treat the items below as the most "
+        "recent real-world information available; do not assume newer events.",
+        "",
+        "## Focus Sectors",
+    ]
     lines += [f"- {s}" for s in watchlist]
+    lines += ["", "## Latest Headlines"]
+    if headlines:
+        for h in headlines:
+            src = f" ({h.domain})" if h.domain else ""
+            lines.append(f"- {h.title}{src}")
+    else:
+        lines.append("- (no recent headlines available)")
     lines += ["", "## Prediction Market Signals (Polymarket)"]
     if markets:
         for m in markets:
@@ -62,8 +83,9 @@ def build_seed_markdown(
     lines += [
         "",
         "## Context",
-        "These prediction markets and focus sectors represent current public and "
-        "market attention. Use them as seed signals for crowd-sentiment simulation.",
+        "These headlines, prediction markets, and focus sectors represent current "
+        "public and market attention. Use them as seed signals for crowd-sentiment "
+        "simulation.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -83,11 +105,22 @@ def generate_seed(
     watchlist: Optional[List[str]] = None,
     date: Optional[str] = None,
     max_markets: int = 8,
+    news_client: Optional[SupportsFetchArticles] = None,
+    max_headlines: int = 8,
 ) -> Tuple[Path, str]:
-    """시드 문서 작성 + 예측 요구사항 반환. (seed_path, requirement)."""
+    """시드 문서 작성 + 예측 요구사항 반환. (seed_path, requirement).
+
+    news_client가 주어지면 최신 헤드라인을 시드에 포함한다(실패 시 graceful).
+    주어지지 않으면 헤드라인 없이 진행(기존 동작과 동일).
+    """
     wl = watchlist or DEFAULT_WATCHLIST
     day = date or _today()
     markets = find_markets(FINANCE_KEYWORDS, pm_client, max_results=max_markets)
-    text = build_seed_markdown(markets, wl, day)
+    headlines: List[Headline] = []
+    if news_client is not None:
+        headlines = fetch_headlines(
+            FINANCE_KEYWORDS + wl, news_client, max_records=max_headlines
+        )
+    text = build_seed_markdown(markets, wl, day, headlines, generated_at=_now_utc())
     path = write_seed(text, shared_dir, day)
     return path, build_simulation_requirement(wl)

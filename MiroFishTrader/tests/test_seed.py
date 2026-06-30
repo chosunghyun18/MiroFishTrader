@@ -61,3 +61,50 @@ def test_default_watchlist_used(tmp_path):
     _, req = generate_seed(FakePM(), shared_dir=str(tmp_path))
     for sector in DEFAULT_WATCHLIST:
         assert sector in req
+
+
+class FakeNews:
+    def fetch_articles(self, query, *, max_records=20, timespan="1d"):
+        return [
+            {
+                "title": "Chip stocks jump on AI demand",
+                "url": "https://ex.com/x",
+                "domain": "ex.com",
+                "seendate": "20260628T120000Z",
+            }
+        ]
+
+
+def test_seed_markdown_has_timestamp_and_headlines():
+    from src.sources.news import Headline
+
+    md = build_seed_markdown(
+        [],
+        ["AI"],
+        "2026-06-28",
+        headlines=[Headline("Chip stocks jump", "u", "ex.com", "s")],
+        generated_at="2026-06-28 09:00 UTC",
+    )
+    assert "Data as of 2026-06-28 09:00 UTC" in md
+    assert "## Latest Headlines" in md
+    assert "Chip stocks jump (ex.com)" in md
+
+
+def test_seed_markdown_no_headlines_degrades():
+    md = build_seed_markdown([], ["AI"], "2026-06-28")
+    assert "no recent headlines available" in md
+
+
+def test_generate_seed_includes_news_when_client_given(tmp_path):
+    path, _ = generate_seed(
+        FakePM(), shared_dir=str(tmp_path), news_client=FakeNews(), date="2026-06-28"
+    )
+    content = path.read_text(encoding="utf-8")
+    assert "Chip stocks jump on AI demand" in content
+    assert "Data as of" in content
+
+
+def test_generate_seed_without_news_client_skips_headlines(tmp_path):
+    path, _ = generate_seed(FakePM(), shared_dir=str(tmp_path), date="2026-06-28")
+    content = path.read_text(encoding="utf-8")
+    assert "no recent headlines available" in content
