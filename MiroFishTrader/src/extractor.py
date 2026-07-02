@@ -56,11 +56,34 @@ def _sections_to_text(report: Dict[str, Any]) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def build_prompt(report: Dict[str, Any]) -> str:
-    """리포트에서 본문 텍스트를 골라 추출 프롬프트 생성."""
+_TRUNCATE_MARKER = "\n\n[... truncated ...]"
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    """본문이 max_chars를 넘으면 문단/줄 경계에서 잘라 마커를 붙인다.
+
+    LLM(qwen2.5:7b) 추론 시간은 프롬프트 토큰 수에 거의 선형이므로, 과도하게
+    긴 MiroFish 리포트가 프롬프트를 무한정 부풀리지 않도록 상한을 둔다.
+    가능하면 빈 줄(문단 경계)에서 자르고, 없으면 줄바꿈 경계, 그마저 없으면
+    하드 슬라이스로 폴백한다.
+    """
+    if len(text) <= max_chars:
+        return text
+    head = text[:max_chars]
+    cut = head.rfind("\n\n")
+    if cut == -1:
+        cut = head.rfind("\n")
+    if cut == -1:
+        cut = max_chars
+    return head[:cut].rstrip() + _TRUNCATE_MARKER
+
+
+def build_prompt(report: Dict[str, Any], *, max_chars: int = 12000) -> str:
+    """리포트에서 본문 텍스트를 골라 추출 프롬프트 생성 (max_chars로 길이 상한)."""
     text = str(report.get("markdown_content") or "").strip()
     if not text:
         text = _sections_to_text(report)
+    text = _truncate_text(text, max_chars)
     return PROMPT_TEMPLATE.format(report_text=text)
 
 
@@ -90,6 +113,7 @@ def extract_signal(
     llm: SupportsComplete,
     *,
     date: Optional[str] = None,
+    max_chars: int = 12000,
 ) -> ExtractedSignal:
     """MiroFish 리포트 dict → 검증된 ExtractedSignal.
 
@@ -97,7 +121,7 @@ def extract_signal(
         ValueError: LLM 응답을 JSON으로 파싱하지 못한 경우.
         LLMError: LLM 호출 자체가 실패한 경우.
     """
-    prompt = build_prompt(report)
+    prompt = build_prompt(report, max_chars=max_chars)
     raw_text = llm.complete(prompt)
     raw = _parse_json(raw_text)
     return ExtractedSignal.from_raw(

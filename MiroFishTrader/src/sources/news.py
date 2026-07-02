@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 import requests
 
@@ -76,9 +76,16 @@ class SupportsFetchArticles(Protocol):
 class GdeltClient:
     """GDELT DOC API에서 기사 목록(ArtList, JSON)을 시간 역순으로 가져온다."""
 
-    def __init__(self, base_url: str = GDELT_DOC_BASE, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        base_url: str = GDELT_DOC_BASE,
+        timeout: int = 30,
+        *,
+        session: Optional[requests.Session] = None,
+    ) -> None:
         self.base_url = base_url
         self.timeout = timeout
+        self._session = session or requests.Session()
 
     def fetch_articles(
         self, query: str, *, max_records: int = 20, timespan: str = "1d"
@@ -91,7 +98,7 @@ class GdeltClient:
             "timespan": timespan,
             "sort": "DateDesc",
         }
-        resp = requests.get(self.base_url, params=params, timeout=self.timeout)
+        resp = self._session.get(self.base_url, params=params, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
         articles = data.get("articles") if isinstance(data, dict) else None

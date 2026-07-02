@@ -1,7 +1,7 @@
 """polymarket 단위 테스트 (HTTP 없이 FakeClient)."""
 from __future__ import annotations
 
-from src.polymarket import find_markets, parse_market
+from src.polymarket import filter_raw_markets, find_markets, parse_market
 
 RAW_MARKETS = [
     {
@@ -71,6 +71,25 @@ def test_find_markets_handles_fetch_error():
 
 def test_find_markets_max_results():
     res = find_markets(["will"], FakeClient(RAW_MARKETS), max_results=1)
+    assert len(res) == 1
+
+
+def test_filter_raw_markets_matches_find_markets():
+    """filter_raw_markets(원시 리스트)가 find_markets(fetch+filter)와 동일 결과를 내야 함
+    (fetch를 신호 추출과 병렬 실행하기 위해 분리한 헬퍼)."""
+    res = filter_raw_markets(RAW_MARKETS, ["fed", "recession"])
+    questions = [m.question for m in res]
+    assert "Will the Fed cut rates in July?" in questions
+    assert "Will a recession start in 2026?" in questions
+    assert all("Rihanna" not in q for q in questions)
+
+
+def test_filter_raw_markets_empty_keywords():
+    assert filter_raw_markets(RAW_MARKETS, []) == []
+
+
+def test_filter_raw_markets_max_results():
+    res = filter_raw_markets(RAW_MARKETS, ["will"], max_results=1)
     assert len(res) == 1
 
 

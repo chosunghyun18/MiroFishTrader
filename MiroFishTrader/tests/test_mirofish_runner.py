@@ -102,3 +102,61 @@ def test_run_fails_on_simulation_failure(tmp_path):
 
     with pytest.raises(MiroFishError):
         _runner(client, tmp_path).run(seed, "predict X")
+
+
+def test_poll_backoff_grows_and_is_capped(tmp_path):
+    """_poll이 poll_initial에서 시작해 poll_backoff 배로 증가하다 poll_interval에서 멈추는지."""
+    import pytest
+
+    client = FakeClient()
+    runner = MiroFishRunner(
+        client,
+        shared_dir=str(tmp_path),
+        poll_initial=1.0,
+        poll_backoff=1.5,
+        poll_interval=3.0,
+        sleep=lambda s: sleeps.append(s),
+    )
+    sleeps: list[float] = []
+
+    statuses = iter(["running"] * 6 + ["completed"])
+
+    runner._poll(
+        lambda: {"status": next(statuses)},
+        done=lambda d: d.get("status") == "completed",
+        fail=lambda d: d.get("status") == "failed",
+        label="테스트",
+    )
+
+    assert sleeps[0] == 1.0
+    assert sleeps[1] == 1.5
+    assert sleeps[2] == pytest.approx(2.25)
+    # 상한(poll_interval)을 넘지 않는지
+    assert all(s <= 3.0 for s in sleeps)
+    # 충분히 반복하면 상한에 도달해 더 이상 커지지 않는지
+    assert sleeps[-1] == 3.0
+    # 전체적으로 증가(비감소) 추세인지
+    assert sleeps == sorted(sleeps)
+
+
+def test_poll_interval_zero_disables_wait(tmp_path):
+    """poll_interval(상한)이 0이면 poll_initial과 무관하게 첫 슬립부터 0이어야 함."""
+    client = FakeClient()
+    sleeps: list[float] = []
+    runner = MiroFishRunner(
+        client,
+        shared_dir=str(tmp_path),
+        poll_initial=1.0,
+        poll_interval=0.0,
+        sleep=lambda s: sleeps.append(s),
+    )
+
+    statuses = iter(["running", "completed"])
+    runner._poll(
+        lambda: {"status": next(statuses)},
+        done=lambda d: d.get("status") == "completed",
+        fail=lambda d: d.get("status") == "failed",
+        label="테스트",
+    )
+
+    assert sleeps == [0.0]

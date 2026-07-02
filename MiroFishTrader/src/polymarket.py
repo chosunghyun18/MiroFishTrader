@@ -103,9 +103,16 @@ class SupportsFetchMarkets(Protocol):
 class PolymarketClient:
     """Gamma API에서 활성 마켓을 거래량순으로 가져오는 클라이언트."""
 
-    def __init__(self, base_url: str = GAMMA_BASE, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        base_url: str = GAMMA_BASE,
+        timeout: int = 30,
+        *,
+        session: Optional[requests.Session] = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._session = session or requests.Session()
 
     def fetch_markets(self, limit: int = 100) -> List[Dict[str, Any]]:
         params = {
@@ -115,12 +122,30 @@ class PolymarketClient:
             "ascending": "false",
             "limit": limit,
         }
-        resp = requests.get(
+        resp = self._session.get(
             f"{self.base_url}/markets", params=params, timeout=self.timeout
         )
         resp.raise_for_status()
         data = resp.json()
         return data if isinstance(data, list) else []
+
+
+def filter_raw_markets(
+    raw: List[Dict[str, Any]],
+    keywords: List[str],
+    *,
+    max_results: int = 5,
+) -> List[PolymarketMarket]:
+    """원시 마켓 dict 리스트를 파싱 후 키워드로 필터링.
+
+    fetch(네트워크 I/O)와 filter(순수 계산)를 분리해두면, Polymarket
+    조회를 신호 추출(LLM)과 동시에 실행하고 신호가 준비된 뒤 필터링만
+    나중에 수행하는 파이프라인 구성이 가능해진다.
+    """
+    if not [k for k in keywords if k.strip()]:
+        return []
+    parsed = [parse_market(m) for m in raw if isinstance(m, dict)]
+    return filter_markets(parsed, keywords, max_results=max_results)
 
 
 def find_markets(
@@ -130,7 +155,10 @@ def find_markets(
     fetch_limit: int = 100,
     max_results: int = 5,
 ) -> List[PolymarketMarket]:
-    """키워드 관련 예측시장 조회. 실패 시 빈 리스트 (graceful)."""
+    """키워드 관련 예측시장 조회. 실패 시 빈 리스트 (graceful).
+
+    fetch_markets + filter_raw_markets의 얇은 래퍼 (하위 호환용).
+    """
     if not [k for k in keywords if k.strip()]:
         return []
     try:
@@ -138,5 +166,4 @@ def find_markets(
     except (requests.RequestException, ValueError) as exc:
         logger.warning("Polymarket 조회 실패: %s", exc)
         return []
-    parsed = [parse_market(m) for m in raw if isinstance(m, dict)]
-    return filter_markets(parsed, keywords, max_results=max_results)
+    return filter_raw_markets(raw, keywords, max_results=max_results)

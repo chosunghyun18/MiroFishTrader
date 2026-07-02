@@ -10,17 +10,20 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as _dt
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+import requests
 
 from .config import Settings
 from .extractor import extract_signal
 from .llm import LLMError, OllamaClient, SupportsComplete
 from .mapper import TickerMap, map_signal
 from .models import ExtractedSignal
-from .polymarket import PolymarketClient, SupportsFetchMarkets, find_markets
+from .polymarket import PolymarketClient, SupportsFetchMarkets, filter_raw_markets
 from .report_store import load_latest_report
 from .reporter import build_slack_payload
 from .slack import SlackError, send_payload
@@ -28,10 +31,12 @@ from .slack import SlackError, send_payload
 logger = logging.getLogger(__name__)
 
 
-def _safe_extract(report: Dict[str, Any], llm: SupportsComplete) -> ExtractedSignal:
+def _safe_extract(
+    report: Dict[str, Any], llm: SupportsComplete, *, max_chars: int = 12000
+) -> ExtractedSignal:
     """추출 실패 시 중립 신호로 degrade (리포트 메타데이터 유지)."""
     try:
-        return extract_signal(report, llm)
+        return extract_signal(report, llm, max_chars=max_chars)
     except (ValueError, LLMError) as exc:
         logger.warning("신호 추출 실패 → 중립 degrade: %s", exc)
         outline = report.get("outline") or {}
@@ -40,6 +45,17 @@ def _safe_extract(report: Dict[str, Any], llm: SupportsComplete) -> ExtractedSig
             source_report_id=str(report.get("report_id", "")),
             summary=str(outline.get("summary", "")).strip(),
         )
+
+
+def _safe_fetch_raw_markets(
+    pm_client: SupportsFetchMarkets, *, fetch_limit: int = 100
+) -> List[Dict[str, Any]]:
+    """Polymarket 상위 마켓 원시 조회. 실패 시 빈 리스트 (graceful)."""
+    try:
+        return pm_client.fetch_markets(limit=fetch_limit)
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Polymarket 조회 실패: %s", exc)
+        return []
 
 
 def run_pipeline(
@@ -57,9 +73,19 @@ def run_pipeline(
             send_payload(payload, settings.slack_webhook_url)
         return payload
 
-    signal = _safe_extract(report, llm)
+    # 신호 추출(LLM, 느림)과 Polymarket 상위 마켓 조회(테마 무관)는 서로
+    # 의존하지 않으므로 스레드로 동시 실행해 전체 지연을 줄인다. 필터링
+    # (테마 키워드 매칭)만 신호가 준비된 뒤에 수행한다.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        extract_future = executor.submit(
+            _safe_extract, report, llm, max_chars=settings.extract_prompt_max_chars
+        )
+        markets_future = executor.submit(_safe_fetch_raw_markets, pm_client)
+        signal = extract_future.result()
+        raw_markets = markets_future.result()
+
     mapping = map_signal(signal, TickerMap.load(settings.ticker_map_path))
-    markets = find_markets(signal.themes, pm_client)
+    markets = filter_raw_markets(raw_markets, signal.themes)
     payload = build_slack_payload(signal, mapping, markets)
 
     if not dry_run:

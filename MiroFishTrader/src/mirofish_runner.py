@@ -32,7 +32,9 @@ from .mirofish_export import (
 )
 from .polymarket import PolymarketClient
 from .seed import generate_seed
+from .sources.market import AlphaVantageClient, FinnhubClient, FredClient, StooqClient
 from .sources.news import GdeltClient
+from .sources.social import PrawRedditClient, PytrendsClient
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,8 @@ class MiroFishRunner:
         max_rounds: int = 10,
         platform: str = "parallel",
         poll_interval: float = 5.0,
+        poll_initial: float = 1.0,
+        poll_backoff: float = 1.5,
         poll_timeout: float = 3600.0,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -68,7 +72,9 @@ class MiroFishRunner:
         self.shared_dir = shared_dir
         self.max_rounds = max_rounds
         self.platform = platform
-        self.poll_interval = poll_interval
+        self.poll_interval = poll_interval  # 폴링 간격의 상한(cap)
+        self.poll_initial = poll_initial
+        self.poll_backoff = poll_backoff
         self.poll_timeout = poll_timeout
         self._sleep = sleep
 
@@ -81,6 +87,7 @@ class MiroFishRunner:
         label: str,
     ) -> Dict[str, Any]:
         deadline = time.monotonic() + self.poll_timeout
+        interval = min(self.poll_initial, self.poll_interval)
         while time.monotonic() < deadline:
             data = fetch()
             if done(data):
@@ -88,7 +95,8 @@ class MiroFishRunner:
             if fail(data):
                 raise MiroFishError(f"{label} 실패: {data}")
             logger.info("%s 진행 중... %s", label, _progress_str(data))
-            self._sleep(self.poll_interval)
+            self._sleep(interval)
+            interval = min(interval * self.poll_backoff, self.poll_interval)
         raise MiroFishError(f"{label} 타임아웃 ({self.poll_timeout}s)")
 
     # ── 단계별 ──
@@ -175,10 +183,37 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = Settings.from_env()
+
+    market_quote_clients = [StooqClient()]
+    if settings.alphavantage_api_key:
+        market_quote_clients.append(AlphaVantageClient(settings.alphavantage_api_key))
+    if settings.finnhub_api_key:
+        market_quote_clients.append(FinnhubClient(settings.finnhub_api_key))
+
+    fred_client = FredClient(settings.fred_api_key) if settings.fred_api_key else None
+
+    reddit_client = (
+        PrawRedditClient(
+            settings.reddit_client_id,
+            settings.reddit_client_secret,
+            settings.reddit_user_agent,
+        )
+        if settings.reddit_client_id
+        and settings.reddit_client_secret
+        and settings.reddit_user_agent
+        else None
+    )
+
+    trends_client = PytrendsClient()  # 키 불필요, 미설치/실패 시 graceful degrade
+
     seed_path, requirement = generate_seed(
         PolymarketClient(),
         shared_dir=settings.mirofish_shared_dir,
         news_client=GdeltClient(),
+        market_quote_clients=market_quote_clients,
+        fred_client=fred_client,
+        reddit_client=reddit_client,
+        trends_client=trends_client,
     )
     logger.info("시드 생성: %s", seed_path)
 

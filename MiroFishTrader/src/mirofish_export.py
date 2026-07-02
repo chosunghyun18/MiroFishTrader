@@ -35,9 +35,16 @@ class SupportsGetJson(Protocol):
 class MiroFishClient:
     """MiroFish 백엔드(기본 :5001) GET 클라이언트."""
 
-    def __init__(self, base_url: str = "http://localhost:5001", timeout: int = 30) -> None:
+    def __init__(
+        self,
+        base_url: str = "http://localhost:5001",
+        timeout: int = 30,
+        *,
+        session: Optional[requests.Session] = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._session = session or requests.Session()
 
     def _as_dict(self, resp: requests.Response, path: str) -> Dict[str, Any]:
         try:
@@ -51,14 +58,14 @@ class MiroFishClient:
 
     def get_json(self, path: str) -> Dict[str, Any]:
         try:
-            resp = requests.get(f"{self.base_url}{path}", timeout=self.timeout)
+            resp = self._session.get(f"{self.base_url}{path}", timeout=self.timeout)
         except requests.RequestException as exc:
             raise MiroFishError(f"MiroFish GET 실패 ({path}): {exc}") from exc
         return self._as_dict(resp, path)
 
     def post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self.base_url}{path}", json=payload, timeout=self.timeout
             )
         except requests.RequestException as exc:
@@ -69,7 +76,7 @@ class MiroFishClient:
         self, path: str, *, files: Dict[str, Any], data: Dict[str, Any]
     ) -> Dict[str, Any]:
         try:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self.base_url}{path}", files=files, data=data, timeout=self.timeout
             )
         except requests.RequestException as exc:

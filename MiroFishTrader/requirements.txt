@@ -1,4 +1,7 @@
 requests>=2.31
 PyYAML>=6.0
+# optional freshness sources (lazy-imported; 미설치 시 해당 소스만 자동 skip)
+# praw>=7.7        # Reddit hot
+# pytrends>=4.9    # Google Trends
 # dev
 pytest>=8.0

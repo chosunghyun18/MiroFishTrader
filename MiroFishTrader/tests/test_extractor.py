@@ -105,3 +105,19 @@ def test_prompt_falls_back_to_sections():
     prompt = build_prompt(report)
     assert "Crowd Direction" in prompt
     assert "rate sensitivity" in prompt
+
+
+def test_prompt_truncates_long_body():
+    long_report = {"markdown_content": "동일 문단.\n\n" * 5000}  # 훨씬 큰 본문
+    prompt = build_prompt(long_report, max_chars=100)
+    assert "[... truncated ...]" in prompt
+    # report_text 부분이 max_chars(+마커) 근처로 제한되어야 함
+    report_text = prompt.split("REPORT:\n", 1)[1]
+    assert len(report_text) < 100 + len("[... truncated ...]") + 50
+
+
+def test_prompt_does_not_truncate_short_body():
+    short_report = {"markdown_content": "짧은 리포트 본문입니다."}
+    prompt = build_prompt(short_report, max_chars=12000)
+    assert "[... truncated ...]" not in prompt
+    assert "짧은 리포트 본문입니다." in prompt
