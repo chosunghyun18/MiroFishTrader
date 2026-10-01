@@ -96,6 +96,7 @@ run(`strategy_id`, `param_id`)별 분포 요약을 저장한다.
 python -m src.analysis.run --start 2019-06-01 --end 2019-06-07 --symbol XBTUSD
 # 옵션: --grid grid.json (생략 시 설계 전체 그리드 2,268 run)
 #       --data-dir data/raw/normalized/bitmex (기본)  --out data/out/analysis (기본)
+#       --jobs N (기본 1 = 순차; N ≥ 2 면 spawn 프로세스 풀, 산출물은 N 과 무관하게 같음, 메모리 ≈ N × bars)
 ```
 
 `--grid` 는 축 → 값 목록 JSON 이다. 설계 그리드의 부분집합만 허용하고(그리드 밖 값·알 수 없는 축은 종료코드 2),

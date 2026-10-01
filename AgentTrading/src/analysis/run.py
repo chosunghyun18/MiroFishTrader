@@ -8,6 +8,7 @@
 
     python -m src.analysis.run --start 2019-06-01 --end 2019-06-07 --symbol XBTUSD
     python -m src.analysis.run --start 2019-06-01 --end 2019-06-07 --grid grid.json --out data/out/analysis
+    python -m src.analysis.run --start 2019-06-01 --end 2019-06-07 --jobs 4
 
 | 출력 | 경로 |
 |---|---|
@@ -18,11 +19,14 @@
 - `--grid` 는 축 → 값 목록 JSON(설계 그리드 부분집합만, 생략 축은 설계 값 전체). 위반은 종료코드 2.
 - 결측 일·하드 가드 등 실행 중 예외는 로그 후 종료코드 1. 라운드트립은 run 을 (strategy_id, param_id) 순서로
   실행하며 run 단위로 트리거별 `<parquet>.tmp` 에 이어 쓰고(`src.shared.sink.RoundtripSink`, 메모리 상한 = 행 그룹
-  버퍼 + run 1개 — run 수·구간 길이와 무관), 전체 성공 후에야 rename → JSON·MD 를 원자적으로 쓴다. 실패하면 이번
+  버퍼 + run 1개(`--jobs 1`) — run 수·구간 길이와 무관), 전체 성공 후에야 rename → JSON·MD 를 원자적으로 쓴다. 실패하면 이번
   실행의 `.tmp` 를 지우므로 기존 산출물은 그대로다(rename 뒤 JSON·MD 쓰기 실패는 파일별 원자성만 보장).
 - 0행 트리거는 빈 행 그룹 1개를 쓴다. 트리거당 행 수가 `ROW_GROUP_ROWS` 미만이면 parquet 바이트가 스트리밍 도입 전
   (`DataFrame.to_parquet` 1회)과 같고, 그 이상이면 행 그룹 배치만 달라진다(읽은 내용은 같다).
 - 결정성: 실행 시각·소요 시간은 파일에 넣지 않고 로그로만 낸다. 같은 입력이면 JSON·MD 바이트가 같다.
+- `--jobs N`(기본 1 = 순차): N ≥ 2 면 그리드 run 을 spawn 프로세스 풀에서 계산한다(`src.shared.parallel`, bars 는
+  워커 initializer 로 워커당 1회 전달). 결과는 정렬된 run 순서로 받아(미완료 상한 `WINDOW_PER_JOB × N`) 싱크 쓰기는
+  메인만 하므로 산출물은 N 과 무관하게 바이트 동일하고, 메모리 상한 = 행 그룹 버퍼 + 2N run + 워커당 bars 사본.
 - 모든 손익 지표는 gross(비용 전)다.
 """
 
@@ -47,6 +51,7 @@ from src.analysis.synthetic import GRID, RULESET_VERSION, Params, generate_run
 from src.ingest import normalize
 from src.ingest.store import load_bars
 from src.shared.schema import ROUNDTRIPS, validate_roundtrips
+from src.shared.parallel import ordered_pool_map
 from src.shared.sink import ROW_GROUP_ROWS, RoundtripSink
 
 log = logging.getLogger(__name__)
@@ -131,26 +136,56 @@ def load_grid(path: Path | None) -> tuple[dict, list[Params]]:
     return expand_grid(spec)
 
 
-def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], sink) -> list[dict]:
+def _compute_run(bars: pd.DataFrame, p: Params) -> tuple[dict, pd.DataFrame]:
+    """run 1개: 생성 → 요약(+ strategy_id·param_id·halted). 순차·병렬 경로가 모두 이 함수를 부른다(결정성의 근거).
+
+    모듈 전역 이름(`generate_run`·`summarize_run`)을 호출 시점에 찾는다(테스트 주입용).
+    """
+    res = generate_run(bars, p)
+    summary = summarize_run(res.roundtrips, skipped_min_qty=res.skipped_min_qty)
+    summary["strategy_id"] = p.strategy_id  # 0건 run 은 patterns 가 None 으로 둔다
+    summary["param_id"] = p.param_id
+    summary["halted"] = bool(res.halted)
+    return summary, res.roundtrips
+
+
+_WORKER: dict = {}  # spawn 워커 프로세스 전역: initializer 가 bars 를 한 번만 받아 둔다
+
+
+def _init_worker(bars: pd.DataFrame) -> None:
+    _WORKER["bars"] = bars
+
+
+def _worker_run(p: Params) -> tuple[dict, pd.DataFrame]:
+    return _compute_run(_WORKER["bars"], p)
+
+
+def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], sink, jobs: int = 1) -> list[dict]:
     """run 을 (strategy_id, param_id) 순서로 생성·요약 → `sink.write(strategy_id, 라운드트립)` → 정렬 요약 목록.
 
     `generate_run` 의 trade_id 가 run 안에서 0..n-1 이므로 이 실행 순서가 곧 `RT_SORT_KEY` 정렬 순서다.
     거래 0건 run 도 `write` 를 부르므로 실행한 트리거는 0행이라도 파일을 가진다. 라운드트립은 run 이 끝나면 버린다.
-    요약에는 `halted` 를 덧붙인다.
+    요약에는 `halted` 를 덧붙인다. `jobs ≥ 2` 이고 run 이 2개 이상이면 run 계산을 spawn 프로세스 풀에서 하되 결과는
+    정렬 순서로 받아 싱크 쓰기는 이 프로세스에서만 한다(`ordered_pool_map`) — 출력은 `jobs=1` 과 같다.
     """
+    if jobs < 1:
+        raise ValueError(f"jobs 는 1 이상이어야 한다: {jobs}")
     ordered = sorted(params_list, key=lambda p: (p.strategy_id, p.param_id))
+    if jobs >= 2 and len(ordered) >= 2:
+        results = ordered_pool_map(_worker_run, ordered, jobs, initializer=_init_worker, initargs=(bars,))
+    else:
+        results = (_compute_run(bars, p) for p in ordered)
     summaries = []
     t0 = time.monotonic()
-    for i, p in enumerate(ordered, 1):
-        res = generate_run(bars, p)
-        summary = summarize_run(res.roundtrips, skipped_min_qty=res.skipped_min_qty)
-        summary["strategy_id"] = p.strategy_id  # 0건 run 은 patterns 가 None 으로 둔다
-        summary["param_id"] = p.param_id
-        summary["halted"] = bool(res.halted)
-        summaries.append(summary)
-        sink.write(p.strategy_id, res.roundtrips)
-        if i % PROGRESS_EVERY == 0 or i == len(ordered):
-            log.info("run %d/%d (%.1fs)", i, len(ordered), time.monotonic() - t0)
+    try:
+        for i, (p, (summary, roundtrips)) in enumerate(zip(ordered, results), 1):
+            summaries.append(summary)
+            sink.write(p.strategy_id, roundtrips)
+            del roundtrips
+            if i % PROGRESS_EVERY == 0 or i == len(ordered):
+                log.info("run %d/%d (%.1fs)", i, len(ordered), time.monotonic() - t0)
+    finally:
+        results.close()  # 싱크 쓰기 실패 등으로 빠져나오면 풀의 남은 태스크를 바로 취소한다
     return summaries
 
 
@@ -260,6 +295,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", type=Path, default=normalize.DEFAULT_OUT_DIR,
                    help=f"정규화 데이터 디렉터리 (기본 {normalize.DEFAULT_OUT_DIR})")
     p.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR, help=f"출력 디렉터리 (기본 {DEFAULT_OUT_DIR})")
+    p.add_argument("--jobs", type=int, default=1, metavar="N",
+                   help="run 병렬 프로세스 수 (기본 1 = 순차). 워커마다 bars 사본을 들므로 메모리 ≈ N × bars."
+                        " 결과는 N 과 무관하게 같다")
     return p
 
 
@@ -267,6 +305,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = build_parser()
     a = parser.parse_args(argv)
+    if a.jobs < 1:
+        parser.error(f"--jobs 는 1 이상이어야 한다: {a.jobs}")
     try:
         check_sample_range(a.start, a.end)
     except ValueError as e:
@@ -282,7 +322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.info("1분봉 %d개 로드, run %d개 실행", len(bars), len(params_list))
         paths = output_paths(a.out, a.start, a.end, sorted({p.strategy_id for p in params_list}))
         with open_sink(paths) as sink:
-            summaries = run_grid(bars, params_list, sink)
+            summaries = run_grid(bars, params_list, sink, a.jobs)
             report = build_report(a.start, a.end, a.symbol, bars, axes, summaries)
             sink.commit()
         write_outputs(paths, report)

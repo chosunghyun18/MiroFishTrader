@@ -14,6 +14,7 @@ import pytest
 
 from src.analysis.run import load_grid
 from src.backtest import run as br
+from src.shared import parallel as shared_parallel
 from src.ingest.store import load_bars
 from tests.test_backtest_run import D1, D2, SPAN, SYM, write_days
 from tests.test_backtest_wfcli import FakeLoadBars, FoldsSpy, _loose_gate
@@ -117,7 +118,7 @@ def test_run_grid_order_and_window(norm, grid_file, monkeypatch):
     seq_sink = _ListSink()
     seq = br.run_grid(bars, params, "default", D1, END_D, None, seq_sink)
 
-    monkeypatch.setattr(br, "ProcessPoolExecutor", _CountingPool)
+    monkeypatch.setattr(shared_parallel, "ProcessPoolExecutor", _CountingPool)
     _CountingPool.submitted = 0
     outstanding = []
     par_sink = _ListSink(on_write=lambda: outstanding.append(_CountingPool.submitted - len(par_sink.calls)))

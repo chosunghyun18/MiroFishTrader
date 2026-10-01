@@ -52,16 +52,12 @@
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import logging
 import math
-import multiprocessing
 import sys
 import time
-from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -79,6 +75,7 @@ from src.backtest.walkforward import (N_TRIALS, OOS_END, OOS_LOG_PATH, OOS_START
 from src.ingest import bitmex_funding, normalize
 from src.ingest.store import load_bars
 from src.shared import sink as shared_sink
+from src.shared.parallel import WINDOW_PER_JOB, ordered_pool_map  # noqa: F401 — WINDOW_PER_JOB 재노출
 from src.shared.schema import (ROUNDTRIPS_NET, ROUNDTRIPS_NET_FUNDING, TableSchema, empty_frame,
                                validate_roundtrips_net, validate_roundtrips_net_funding)
 
@@ -165,35 +162,15 @@ def _worker_run(p: Params) -> tuple[dict, pd.DataFrame | None]:
                         w["funding"])
 
 
-WINDOW_PER_JOB = 2  # 병렬 실행 시 미완료 run 상한 = WINDOW_PER_JOB × jobs (메모리 상한이 run 수와 무관)
-
-
 def _parallel_runs(bars, ordered: Sequence[Params], fee_profile, start, end, gate, keep_net: bool, jobs: int,
                    funding=None):
     """spawn 프로세스 풀에서 run 을 계산해 `ordered` 순서 그대로 (summary, net) 을 하나씩 내놓는다.
 
-    정렬 순서 슬라이딩 윈도우: 미완료 future 를 최대 `WINDOW_PER_JOB × jobs` 개 제출하고 맨 앞 future 의
-    결과를 기다려 내놓은 뒤 하나 더 제출한다(완료 순서 무시). 예외·중단 시 남은 태스크를 취소한다.
+    `src.shared.parallel.ordered_pool_map`(정렬 순서 슬라이딩 윈도우, 미완료 ≤ `WINDOW_PER_JOB × jobs`,
+    예외·중단 시 남은 태스크 취소)에 bars 등 공통 입력을 워커 initializer 로 넘긴다.
     """
-    ctx = multiprocessing.get_context("spawn")
-    window = WINDOW_PER_JOB * jobs
-    ex = ProcessPoolExecutor(max_workers=jobs, mp_context=ctx, initializer=_init_worker,
-                             initargs=(bars, fee_profile, start, end, gate, keep_net, funding))
-    pending: deque = deque()
-    it = iter(ordered)
-    ok = False
-    try:
-        for p in itertools.islice(it, window):
-            pending.append(ex.submit(_worker_run, p))
-        while pending:
-            result = pending.popleft().result()
-            nxt = next(it, None)
-            if nxt is not None:
-                pending.append(ex.submit(_worker_run, nxt))
-            yield result
-        ok = True
-    finally:
-        ex.shutdown(wait=True, cancel_futures=not ok)
+    return ordered_pool_map(_worker_run, ordered, jobs, initializer=_init_worker,
+                            initargs=(bars, fee_profile, start, end, gate, keep_net, funding))
 
 
 def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], fee_profile: str | Mapping,
