@@ -91,10 +91,25 @@ def git(*args: str, cwd: Path = WORKTREE, timeout: int = 120) -> subprocess.Comp
     return sh(["git", *args], cwd=cwd, timeout=timeout)
 
 
-def notify(title: str, msg: str) -> None:
+def notify(title: str, msg: str, sound: bool = False) -> None:
     try:
         script = f'display notification {json.dumps(msg)} with title {json.dumps(title)}'
+        if sound:
+            script += ' sound name "Glass"'
         sh(["osascript", "-e", script], timeout=10)
+    except Exception:
+        pass
+
+
+def alarm(title: str, msg: str) -> None:
+    """놓치지 않게 알린다: 알림 + 소리 3회 + 닫을 때까지 남는 경고창."""
+    notify(title, msg, sound=True)
+    try:
+        for _ in range(3):
+            sh(["afplay", "/System/Library/Sounds/Glass.aiff"], timeout=10)
+        subprocess.Popen(["osascript", "-e", f'display alert {json.dumps(title)} message {json.dumps(msg)}'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
     except Exception:
         pass
 
@@ -401,7 +416,7 @@ def run_claude(phase: str, prompt: str, *, cwd: Path, schema: dict | None, log_p
                         if block.get("type") == "tool_use":
                             inp = block.get("input") or {}
                             hint = inp.get("file_path") or inp.get("command") or inp.get("description") or ""
-                            print(f"    · {block.get('name')} {str(hint)[:90]}", flush=True)
+                            print(f"    · {block.get('name')} {' '.join(str(hint).split())[:90]}", flush=True)
                 elif kind == "result":
                     out["text"] = ev.get("result") or ""
                     out["structured"] = ev.get("structured_output")
@@ -432,8 +447,9 @@ class Run:
         self.project = project
         self.wait = not args.no_wait
         self.push = not args.no_push
-        self.deadline = time.time() + args.max_hours * 3600
-        self.weekly_budget = args.weekly_budget
+        self.forever = bool(getattr(args, "forever", False))
+        self.deadline = float("inf") if self.forever else time.time() + args.max_hours * 3600
+        self.weekly_budget = float("inf") if self.forever else args.weekly_budget
         self.week_start: float | None = None
         self.started = now()
         self.log_dir = TOOL_DIR / "logs" / f"{self.started:%Y-%m-%d}" / f"{self.started:%H%M%S}-{project.name}"
@@ -470,7 +486,13 @@ class Run:
                 if self.week_start is None:
                     self.week_start = week
                 if week >= LIMIT_7D:
-                    raise StopRun(f"주간 사용량 {week:.0f}% ≥ 상한 {LIMIT_7D:.0f}%")
+                    if not self.forever:
+                        raise StopRun(f"주간 사용량 {week:.0f}% ≥ 상한 {LIMIT_7D:.0f}%")
+                    reset = (snap.get("seven_day") or {}).get("resets_at")
+                    self.sleep_until(reset or time.time() + 3600, f"주간 창 {week:.0f}% 사용")
+                    self.week_start = None
+                    fresh_snapshot(force=True)
+                    continue
                 if week - self.week_start >= self.weekly_budget:
                     raise StopRun(f"이번 실행의 주간 예산 {self.weekly_budget:.0f}%p 소진 "
                                   f"({self.week_start:.0f}% → {week:.0f}%)")
@@ -485,7 +507,7 @@ class Run:
 
     def call(self, phase: str, prompt: str, schema: dict, tag: str) -> dict:
         """쿼터 게이트 + 실행 + 한도 도달 시 리셋 대기 후 재시도."""
-        for attempt in range(1, 5):
+        for attempt in range(1, 200 if self.forever else 5):
             self.gate()
             log(f"▶ {phase.upper()} {tag}")
             res = run_claude(phase, prompt, cwd=self.cwd_for(phase), schema=schema,
@@ -494,9 +516,9 @@ class Run:
                 if res["timed_out"]:
                     log(f"  ⚠ {phase} 시간 초과")
                 return res
-            if res["limit_type"] and res["limit_type"] != "five_hour":
+            if res["limit_type"] and res["limit_type"] != "five_hour" and not self.forever:
                 raise StopRun(f"한도 도달 ({res['limit_type']})")
-            self.sleep_until(res["resets_at"] or time.time() + 1800, "5시간 창 한도 도달")
+            self.sleep_until(res["resets_at"] or time.time() + 1800, f"한도 도달 ({res['limit_type'] or '5시간 창'})")
             fresh_snapshot(force=True)
         raise StopRun("한도 대기 재시도 초과")
 
@@ -753,6 +775,24 @@ def write_summary(run: Run) -> Path:
     return out
 
 
+def append_progress(run: Run, result: dict) -> None:
+    """태스크가 끝날 때마다 그날의 실행 기록에 한 줄 남긴다 (긴 실행 중에도 진행을 볼 수 있게)."""
+    try:
+        out = AUTO_VAULT / "runs" / f"{now():%Y-%m-%d}.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        header = "" if out.exists() else (
+            f"---\ntags: [업무자동화, autodev, run-log]\ncreated: {now():%Y-%m-%d}\n---\n\n"
+            f"# autodev 실행 기록 {now():%Y-%m-%d}\n\n")
+        mark = "✓" if result["status"] == "done" else "✗"
+        line = (f"- {now():%H:%M} {mark} {run.project.name} {result['id']} {result['title']}"
+                f"{' `' + result['commit'] + '`' if result.get('commit') else ''}"
+                f"{'' if result['status'] == 'done' else ' — ' + str(result.get('note', ''))[:150]}\n")
+        with out.open("a", encoding="utf-8") as f:
+            f.write(header + line)
+    except OSError:
+        pass
+
+
 def _stem(tasks: list[dict], tid: str) -> str:
     for t in tasks:
         if t["id"] == tid:
@@ -783,7 +823,9 @@ def finish_run(run: Run, pr: bool = False) -> None:
         open_pr(run)
     log(f"종료: {run.stop_reason or '큐 소진'} · 완료 {done} · 중단 {blocked}")
     log(f"요약: {summary}")
-    notify("autodev 종료", f"{run.project.name}: 완료 {done} · 중단 {blocked} — {run.stop_reason or '큐 소진'}")
+    need = sum(1 for t in run.project.tasks() if t.get("status") in ("blocked", "manual"))
+    msg = f"{run.project.name}: 완료 {done} · 중단 {blocked} · 사람 조치 필요 {need} — {run.stop_reason or '큐 소진'}"
+    (alarm if run.forever else notify)("autodev 종료", msg)
 
 
 def open_pr(run: Run) -> None:
@@ -801,29 +843,51 @@ def open_pr(run: Run) -> None:
 def cmd_run(args) -> None:
     run = start_run(args)
     project = run.project
+    max_tasks = float("inf") if run.forever else args.max_tasks
+    max_splits = float("inf") if run.forever else args.max_splits
+    max_blocked = max(args.max_blocked, 5) if run.forever else args.max_blocked
     splits = 0
     blocked_streak = 0
+    error_streak = 0
+    topic = args.topic
+    if run.forever:
+        log("무한 모드: 시간·태스크 수·주간 예산 상한 없음. 한도에 닿으면 리셋까지 기다렸다가 이어갑니다.")
     try:
-        if args.topic:
-            do_split(run, args.topic)
-            splits += 1
-        while len(run.results) < args.max_tasks:
-            run.check_stop()
-            sync_base()                     # 다른 세션이 그사이 커밋한 내용을 따라간다
-            task = next_task(project.tasks())
-            if not task:
-                if splits >= args.max_splits:
-                    raise StopRun("실행 가능한 태스크 없음 (분해 횟수 상한)")
-                splits += 1
-                log("큐가 비었습니다 — 프로젝트 TODO 에서 다음 작업을 분해합니다")
-                if do_split(run, None) == 0:
-                    raise StopRun("자동으로 진행할 수 있는 작업이 더 없음")
-                continue
-            result = run_task(run, task)
-            run.results.append(result)
-            blocked_streak = blocked_streak + 1 if result["status"] == "blocked" else 0
-            if blocked_streak >= args.max_blocked:
-                raise StopRun(f"태스크 {blocked_streak}개 연속 중단 — 공통 원인 점검 필요")
+        while len(run.results) < max_tasks:
+            try:
+                run.check_stop()
+                if topic:
+                    do_split(run, topic)
+                    splits += 1
+                    topic = None
+                sync_base()                     # 다른 세션이 그사이 커밋한 내용을 따라간다
+                task = next_task(project.tasks())
+                if not task:
+                    if splits >= max_splits:
+                        raise StopRun("실행 가능한 태스크 없음 (분해 횟수 상한)")
+                    splits += 1
+                    log("큐가 비었습니다 — 프로젝트 TODO 에서 다음 작업을 분해합니다")
+                    if do_split(run, None) == 0:
+                        raise StopRun("자동으로 진행할 수 있는 작업이 더 없음 (완료 또는 사람 조치 대기)")
+                    continue
+                result = run_task(run, task)
+                run.results.append(result)
+                append_progress(run, result)
+                error_streak = 0
+                blocked_streak = blocked_streak + 1 if result["status"] == "blocked" else 0
+                if blocked_streak >= max_blocked:
+                    raise StopRun(f"태스크 {blocked_streak}개 연속 중단 — 공통 원인 점검 필요")
+            except (StopRun, KeyboardInterrupt):
+                raise
+            except Exception as e:               # 무한 모드에서는 일시적 오류로 죽지 않는다
+                if not run.forever:
+                    raise
+                error_streak += 1
+                import traceback
+                log(f"⚠ 예기치 않은 오류 ({error_streak}/5): {e}\n{traceback.format_exc()[-1500:]}")
+                if error_streak >= 5:
+                    raise StopRun(f"오류 5회 연속: {e}")
+                time.sleep(300)
         else:
             run.stop_reason = f"최대 태스크 수({args.max_tasks}) 도달"
     except StopRun as e:
@@ -1032,6 +1096,8 @@ def main() -> None:
     p.add_argument("--max-splits", type=int, default=3, help="한 실행에서 자동 분해 최대 횟수")
     p.add_argument("--max-blocked", type=int, default=3, help="연속 중단 허용 개수")
     p.add_argument("--pr", action="store_true", help="끝나면 main 대상 PR 생성")
+    p.add_argument("--forever", action="store_true",
+                   help="상한 없이 계속: 할 일이 없어질 때까지 돌고, 한도에 닿으면 리셋까지 대기, 끝나면 알람")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("task", help="태스크 1개만 실행")

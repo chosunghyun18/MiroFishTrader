@@ -27,6 +27,14 @@ autodev/autodev status
 autodev/autodev stop
 ```
 
+끝날 때까지 상한 없이 돌리려면 `--forever` 를 붙인다. 시간·태스크 수·주간 예산 상한이 없어지고,
+5시간 창이나 주간 창이 차면 리셋까지 기다렸다가 이어간다. 더 할 일이 없거나 태스크가 5개 연속 중단되면
+소리와 경고창으로 알린다.
+
+```bash
+nohup caffeinate -i autodev/autodev run -P AgentTrading --forever > /tmp/autodev.out 2>&1 &
+```
+
 터미널을 닫아도 계속 돌리려면:
 
 ```bash
