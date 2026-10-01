@@ -15,6 +15,7 @@ backtest:
     min_trades: 100
     min_sharpe: 1.0
     max_drawdown: 0.30
+    min_dsr: 0.95             # 워크포워드 다중 비교 보정(Deflated Sharpe) 기준
 
 agent:
   mode: paper                 # paper | live — live 전환은 수동 판단
