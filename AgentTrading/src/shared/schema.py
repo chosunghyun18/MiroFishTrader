@@ -1,9 +1,9 @@
-"""정규화·분석 테이블 스키마(trades, bars_1m, fills, roundtrips)와 DataFrame 검증.
+"""정규화·분석 테이블 스키마(trades, bars_1m, fills, roundtrips, funding)와 DataFrame 검증.
 
 파서(ingest)·리샘플·분석 모듈은 컬럼·dtype 정의를 여기서만 가져온다.
 설계 근거(단일 기준): Obsidian `Projects/work/AgentTrading/design/phase1-ingest-schema.md`
 (roundtrips 는 `design/phase2-synthetic-strategy.md` "라운드트립 스키마",
-roundtrips_net 은 `design/phase3-backtest.md` "net 열").
+roundtrips_net 은 `design/phase3-backtest.md` "net 열", funding 은 같은 문서 "펀딩 모델" 6항).
 문서와 이 파일이 다르면 문서를 따르고, 문서를 먼저 고친 뒤 이 파일을 맞춘다.
 
     from src.shared.schema import TRADES, validate_trades, empty_frame
@@ -170,6 +170,18 @@ ROUNDTRIPS_NET = TableSchema(
     key=ROUNDTRIPS.key,
 )
 
+# 펀딩 정산 이력(정산 1회 = 1행). 설계 근거: phase3-backtest.md "펀딩 모델" 6항.
+# API 의 fundingInterval·fundingRateDaily 는 저장하지 않는다(간격은 ts 차분으로 검사).
+FUNDING = TableSchema(
+    name="funding",
+    columns=(
+        ColumnSpec("ts", UTC_NS),
+        ColumnSpec("symbol", STRING),
+        ColumnSpec("funding_rate", FLOAT64),
+    ),
+    key=("symbol", "ts"),
+)
+
 
 def _dtype_problem(actual, expected) -> str | None:
     """dtype 이 맞으면 None, 아니면 위반 설명."""
@@ -257,6 +269,14 @@ def validate_roundtrips(df: pd.DataFrame, strict: bool = True) -> pd.DataFrame:
 
 def validate_roundtrips_net(df: pd.DataFrame, strict: bool = True) -> pd.DataFrame:
     return validate(df, ROUNDTRIPS_NET, strict=strict)
+
+
+def validate_funding(df: pd.DataFrame) -> pd.DataFrame:
+    validate(df, FUNDING)
+    n = int((~np.isfinite(df["funding_rate"].to_numpy())).sum())
+    if n:
+        raise SchemaError(f"[funding] 컬럼 'funding_rate' 무한값 {n}건 (유한값 필요)")
+    return df
 
 
 def empty_frame(schema: TableSchema) -> pd.DataFrame:
