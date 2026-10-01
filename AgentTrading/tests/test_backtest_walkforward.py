@@ -3,6 +3,7 @@
 기대값은 phase3-backtest.md "워크포워드" 의 리터럴이다.
 """
 
+import hashlib
 import inspect
 import json
 import math
@@ -179,6 +180,34 @@ def test_authorize_oos(tmp_path):
     log.write_text("not json\n")
     with pytest.raises(PermissionError):
         authorize_oos(sel, log)
+
+
+def test_selection_funding_field_changes_sha_only_when_present(tmp_path):
+    off = make_selection(summary_full())
+    on = make_selection(summary_full(), funding=True)
+    assert "funding" not in off and make_selection(summary_full(), funding=False) == off
+    assert on["funding"] is True and on["sha256"] == selection_sha256(on)
+    assert on["sha256"] != off["sha256"]
+    assert {k: v for k, v in on.items() if k not in ("funding", "sha256")} == \
+        {k: v for k, v in off.items() if k != "sha256"}
+    # 끔 선택의 해시 본문은 기존 5키 그대로(펀딩 도입 전 sha256 보존)
+    body = {k: off[k] for k in wf.SELECTION_KEYS}
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert off["sha256"] == hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    # 내용이 바뀐 funding 은 sha256 불일치로 거부
+    with pytest.raises(ValueError, match="sha256"):
+        authorize_oos({k: v for k, v in on.items() if k != "funding"}, tmp_path / "log.jsonl")
+    assert authorize_oos(on, tmp_path / "log.jsonl") == (utc("2022-01-01"), utc("2025-01-01"))
+
+
+@pytest.mark.parametrize("value", [False, "yes", 1, None])
+def test_authorize_oos_rejects_non_true_funding(tmp_path, value):
+    sel = {k: v for k, v in make_selection(summary_full()).items() if k != "sha256"}
+    sel["funding"] = value
+    sel["sha256"] = selection_sha256(sel)  # 해시는 맞지만 값이 true 가 아니다
+    with pytest.raises(ValueError, match="funding"):
+        authorize_oos(sel, tmp_path / "log.jsonl")
+    assert not (tmp_path / "log.jsonl").exists()
 
 
 def test_evaluate_oos_logs_and_guards(tmp_path):

@@ -43,6 +43,7 @@ OOS_LOG_PATH = Path("data/backtest/oos_access.jsonl")
 WALKFORWARD_STRATEGY_ID = "walkforward"
 WALKFORWARD_PARAM_ID = "stitched"
 SELECTION_KEYS = ("strategy_id", "param_id", "selected_on", "fee_profile", "gate")
+SELECTION_OPTIONAL_KEYS = ("funding",)  # 있을 때만 해시(설계 "펀딩 모델" 10항: 끄면 필드 없음 → 기존 sha256)
 
 _N = NormalDist()
 
@@ -219,14 +220,18 @@ def walkforward_verdict(summary: Mapping, dsr: float, gate: Mapping | None = Non
 # 선택 파일·OOS ---------------------------------------------------------------------------------------
 
 def selection_sha256(sel: Mapping) -> str:
-    """`sha256` 을 뺀 선택 필드의 정규 JSON(키 정렬, `,` `:`) 해시."""
+    """`sha256` 을 뺀 선택 필드의 정규 JSON(키 정렬, `,` `:`) 해시. 선택 키(`funding`)는 있을 때만 넣는다."""
     body = {k: sel[k] for k in SELECTION_KEYS}
+    body.update({k: sel[k] for k in SELECTION_OPTIONAL_KEYS if k in sel})
     raw = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def make_selection(summary: Mapping, gate: Mapping | None = None) -> dict:
-    """기본 표본 전체 학습 요약에서 고른 run 요약 → 선택 dict(+`sha256`). 구간이 표본 전체가 아니면 `ValueError`."""
+def make_selection(summary: Mapping, gate: Mapping | None = None, funding: bool = False) -> dict:
+    """기본 표본 전체 학습 요약에서 고른 run 요약 → 선택 dict(+`sha256`). 구간이 표본 전체가 아니면 `ValueError`.
+
+    `funding=True`(펀딩 반영 실행)면 `funding: True` 를 넣어 sha256 이 달라진다. 끄면 필드가 없다.
+    """
     s, e = _day(summary["start"], "start"), _day(summary["end"], "end")
     if (s, e) != (SAMPLE_START, OOS_START):
         raise ValueError(f"선택은 기본 표본 전체 [{_fmt(SAMPLE_START)}, {_fmt(OOS_START)}) 에서 해야 한다: "
@@ -240,6 +245,8 @@ def make_selection(summary: Mapping, gate: Mapping | None = None) -> dict:
         "fee_profile": "default",
         "gate": resolve_gate(gate),
     }
+    if funding:
+        sel["funding"] = True
     sel["sha256"] = selection_sha256(sel)
     return sel
 
@@ -247,7 +254,8 @@ def make_selection(summary: Mapping, gate: Mapping | None = None) -> dict:
 def authorize_oos(selection: Mapping, log_path=OOS_LOG_PATH) -> tuple[pd.Timestamp, pd.Timestamp]:
     """선택 파일 검증 + 접근 로그 검사(쓰기 없음) → OOS (start, end).
 
-    필수 키 누락·sha256 불일치·표본 전체가 아닌 선택·`default` 아닌 프로필 → `ValueError`.
+    필수 키 누락·sha256 불일치·표본 전체가 아닌 선택·`default` 아닌 프로필·`funding` 이 있는데 `True` 아님
+    → `ValueError`.
     로그에 다른 sha256(또는 읽을 수 없는 줄)이 있으면 `PermissionError`. 같은 sha256 은 허용.
     """
     missing = [k for k in (*SELECTION_KEYS, "sha256") if k not in selection]
@@ -259,6 +267,8 @@ def authorize_oos(selection: Mapping, log_path=OOS_LOG_PATH) -> tuple[pd.Timesta
         raise ValueError(f"선택 구간이 기본 표본 전체가 아니다: {selection['selected_on']}")
     if selection["fee_profile"] != "default":
         raise ValueError(f"선택 수수료 프로필은 default 여야 한다: {selection['fee_profile']!r}")
+    if "funding" in selection and selection["funding"] is not True:
+        raise ValueError(f"선택 funding 은 있으면 true 여야 한다: {selection['funding']!r}")
     sha = selection["sha256"]
     path = Path(log_path)
     if path.exists():

@@ -9,6 +9,8 @@
     python -m src.backtest.run --start 2020-03-01 --end 2020-04-01 --grid grid.json --fee-profile bybit
     python -m src.backtest.run --walkforward --grid grid.json
     python -m src.backtest.run --oos-final data/out/backtest/walkforward/selection.json --grid grid.json
+    python -m src.backtest.run --start 2019-06-01 --end 2019-06-08 --funding
+    python -m src.backtest.run --walkforward --grid grid.json --funding --funding-dir data/raw/normalized/bitmex/funding
 
 | 출력 | 경로 |
 |---|---|
@@ -16,6 +18,7 @@
 | 요약 | `<out>/summary/<fee_profile>/<YYYYMMDD>_<YYYYMMDD>.json` + 같은 이름 `.md` |
 | 워크포워드(`--walkforward`) | `<out>/walkforward/default.json` + `.md`, 선택이 있으면 `<out>/walkforward/selection.json` |
 | OOS 1회(`--oos-final PATH`) | `<out>/oos/<sha256 앞 12자>.json` + `.md`, 접근 로그 `--oos-log`(기본 `data/backtest/oos_access.jsonl`) 한 줄 |
+| 펀딩 반영(`--funding`) | 위 `<fee_profile>` → `<fee_profile>+funding`, `walkforward/default+funding.json`·`.md`·`selection+funding.json`, OOS 는 경로 그대로(sha256 이 달라 분리) |
 
 - 구간은 반열린 `[start, end)` UTC 자정 — `--end` 날짜는 포함하지 않는다(분석 CLI 의 종료일 포함과 다름).
   파일명의 두 번째 날짜도 반열린 end 다.
@@ -38,6 +41,12 @@
 - `--jobs N`(기본 1 = 순차): N ≥ 2 면 그리드 run 을 spawn 프로세스 풀에서 계산한다(bars 는 워커 initializer 로
   워커당 1회 전달). 결과는 정렬된 run 순서로 받아(미완료 상한 `WINDOW_PER_JOB × N`) 싱크 쓰기는 메인만 하므로
   산출물은 N 과 무관하게 같고, 메모리 상한 = 행 그룹 버퍼 + 2N run + 워커당 bars 사본. `--oos-final` 은 순차.
+- `--funding [--funding-dir PATH]`(기본 끔, 설계 "펀딩 모델" 5·8·9·10항): 실행 전 평가 구간(기본 `[start, end)`,
+  `--walkforward` 기본 표본, `--oos-final` OOS) 펀딩 파일 부재·격자(04·12·20 UTC) 결측 → 종료코드 1·산출물 없음.
+  모든 run 이 `apply_costs` 뒤 `costs.apply_funding`(net 이 펀딩 포함으로 갱신)을 거치고, 요약은 `ROUNDTRIPS_NET`
+  32열 투영본으로 계산한 뒤 `n_funding`·`total_funding_xbt` 합을 붙인다. 리포트 `meta.funding`·MD 펀딩 열,
+  선택 파일 `funding: true`(sha256 이 달라짐). `--oos-final` 은 선택 `funding` 과 `--funding` 이 다르면 2.
+  끄면 모든 산출물이 펀딩 도입 전과 바이트 동일하다(키·열·경로를 켰을 때만 만든다).
 """
 
 from __future__ import annotations
@@ -70,9 +79,10 @@ from src.backtest.walkforward import (N_TRIALS, OOS_END, OOS_LOG_PATH, OOS_START
                                       expected_max_sr, make_folds, make_selection, resolve_gate,
                                       select_params, sr_variance, stitch_test_roundtrips,
                                       walkforward_verdict)
-from src.ingest import normalize
+from src.ingest import bitmex_funding, normalize
 from src.ingest.store import load_bars
-from src.shared.schema import ROUNDTRIPS_NET, empty_frame, validate_roundtrips_net
+from src.shared.schema import (ROUNDTRIPS_NET, ROUNDTRIPS_NET_FUNDING, TableSchema, empty_frame,
+                               validate_roundtrips_net, validate_roundtrips_net_funding)
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +92,9 @@ ROW_GROUP_ROWS = 100_000  # 트리거별 버퍼가 이 행 수에 닿으면 행 
 RT_SORT_KEY = ["strategy_id", "param_id", "trade_id"]
 MD_COLUMNS = ("strategy_id", "param_id", "n_trades", "sharpe", "mdd", "total_net_ret", "total_gross_ret",
               "n_liq_breach", "gate")
+FUNDING_MD_COLUMNS = ("n_funding", "total_funding_xbt")  # 펀딩 켰을 때만 기본 모드 표 끝에
+FUNDING_SUFFIX = "+funding"
+FUNDING_GAP_SHOW = 5  # 결측 오류 메시지에 보일 시각 수
 
 
 class RoundtripSink:
@@ -92,9 +105,11 @@ class RoundtripSink:
     with 블록에서 예외가 나거나 commit 전에 빠져나오면 `abort()` 가 이번 실행의 `.tmp` 를 모두 지운다.
     """
 
-    def __init__(self, paths: Mapping[str, Path]):
+    def __init__(self, paths: Mapping[str, Path], schema: TableSchema = ROUNDTRIPS_NET):
         self.paths = dict(paths)
-        self.schema = pa.Schema.from_pandas(empty_frame(ROUNDTRIPS_NET), preserve_index=False)
+        self.schema = pa.Schema.from_pandas(empty_frame(schema), preserve_index=False)
+        self._validate = validate_roundtrips_net_funding if schema is ROUNDTRIPS_NET_FUNDING \
+            else validate_roundtrips_net
         self._tmps: dict[str, Path] = {}
         self._sid: str | None = None
         self._writer: pq.ParquetWriter | None = None
@@ -113,7 +128,7 @@ class RoundtripSink:
             self._writer = pq.ParquetWriter(tmp, self.schema, compression="snappy")
             self._sid = sid
         if len(df):
-            validate_roundtrips_net(df)
+            self._validate(df)
             self._buf.append(pa.Table.from_pandas(df, schema=self.schema, preserve_index=False))
             self._buf_rows += len(df)
             if self._buf_rows >= ROW_GROUP_ROWS:
@@ -156,36 +171,70 @@ class RoundtripSink:
             self.abort()
 
 
+def _project_net(net: pd.DataFrame) -> pd.DataFrame:
+    """펀딩 반영 net(34열) → `ROUNDTRIPS_NET` 32열(`net_ret` 은 이미 펀딩 포함). metrics·walkforward 의 strict 검증용."""
+    return net[ROUNDTRIPS_NET.column_names]
+
+
+def _funding_totals(net: pd.DataFrame) -> dict:
+    """펀딩 반영 net → run 요약에 붙일 `n_funding`(정산 수 합)·`total_funding_xbt`(비용 부호 XBT 합)."""
+    return {"n_funding": int(net["n_funding"].sum()), "total_funding_xbt": float(net["funding_xbt"].sum())}
+
+
+def _empty_funding_totals() -> dict:
+    return {"n_funding": 0, "total_funding_xbt": 0.0}
+
+
+def _net_and_summary(net: pd.DataFrame, start, end, gate: Mapping | None, funding: pd.DataFrame | None,
+                     bars: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """비용 적용된 net → (펀딩 켰으면 `apply_funding`) → 요약. 펀딩 끔이면 기존 경로 그대로.
+
+    켜면 요약은 32열 투영본으로 계산하고(`summarize_net_run` 무변경, 설계 8항) 펀딩 합계를 붙인다.
+    """
+    if funding is None:
+        return net, summarize_net_run(net, start, end, gate)
+    net = costs.apply_funding(net, funding, bars)
+    summary = summarize_net_run(_project_net(net), start, end, gate)
+    summary.update(_funding_totals(net))
+    return net, summary
+
+
 def _compute_run(bars: pd.DataFrame, p: Params, fee_profile: str | Mapping, start: date, end: date,
-                 gate: Mapping | None, keep_net: bool = True) -> tuple[dict, pd.DataFrame | None]:
-    """run 1개: 생성 → 비용 → 요약(+ run 키). 순차·병렬 경로가 모두 이 함수를 부른다(결정성의 근거).
+                 gate: Mapping | None, keep_net: bool = True,
+                 funding: pd.DataFrame | None = None) -> tuple[dict, pd.DataFrame | None]:
+    """run 1개: 생성 → 비용 → (펀딩) → 요약(+ run 키). 순차·병렬 경로가 모두 이 함수를 부른다(결정성의 근거).
 
     모듈 전역 이름(`generate_run`·`costs.apply_costs`·`summarize_net_run`)을 호출 시점에 찾는다(테스트 주입용).
     `keep_net=False` 면 net 프레임 대신 None 을 돌려준다(요약만 필요한 그리드의 IPC 절약).
+    `funding` 이 있으면 `apply_costs` 뒤 `costs.apply_funding` 을 적용한다(net = `ROUNDTRIPS_NET_FUNDING`).
     """
     res = generate_run(bars, p)
     net = costs.apply_costs(res.roundtrips, fee_profile)
     del res
-    summary = _with_run_key(summarize_net_run(net, start, end, gate), p.strategy_id, p.param_id)
+    net, summary = _net_and_summary(net, start, end, gate, funding, bars)
+    summary = _with_run_key(summary, p.strategy_id, p.param_id)
     return summary, (net if keep_net else None)
 
 
 _WORKER: dict = {}  # spawn 워커 프로세스 전역: initializer 가 bars 등 run 공통 입력을 한 번만 받아 둔다
 
 
-def _init_worker(bars, fee_profile, start, end, gate, keep_net) -> None:
-    _WORKER.update(bars=bars, fee_profile=fee_profile, start=start, end=end, gate=gate, keep_net=keep_net)
+def _init_worker(bars, fee_profile, start, end, gate, keep_net, funding=None) -> None:
+    _WORKER.update(bars=bars, fee_profile=fee_profile, start=start, end=end, gate=gate, keep_net=keep_net,
+                   funding=funding)
 
 
 def _worker_run(p: Params) -> tuple[dict, pd.DataFrame | None]:
     w = _WORKER
-    return _compute_run(w["bars"], p, w["fee_profile"], w["start"], w["end"], w["gate"], w["keep_net"])
+    return _compute_run(w["bars"], p, w["fee_profile"], w["start"], w["end"], w["gate"], w["keep_net"],
+                        w["funding"])
 
 
 WINDOW_PER_JOB = 2  # 병렬 실행 시 미완료 run 상한 = WINDOW_PER_JOB × jobs (메모리 상한이 run 수와 무관)
 
 
-def _parallel_runs(bars, ordered: Sequence[Params], fee_profile, start, end, gate, keep_net: bool, jobs: int):
+def _parallel_runs(bars, ordered: Sequence[Params], fee_profile, start, end, gate, keep_net: bool, jobs: int,
+                   funding=None):
     """spawn 프로세스 풀에서 run 을 계산해 `ordered` 순서 그대로 (summary, net) 을 하나씩 내놓는다.
 
     정렬 순서 슬라이딩 윈도우: 미완료 future 를 최대 `WINDOW_PER_JOB × jobs` 개 제출하고 맨 앞 future 의
@@ -194,7 +243,7 @@ def _parallel_runs(bars, ordered: Sequence[Params], fee_profile, start, end, gat
     ctx = multiprocessing.get_context("spawn")
     window = WINDOW_PER_JOB * jobs
     ex = ProcessPoolExecutor(max_workers=jobs, mp_context=ctx, initializer=_init_worker,
-                             initargs=(bars, fee_profile, start, end, gate, keep_net))
+                             initargs=(bars, fee_profile, start, end, gate, keep_net, funding))
     pending: deque = deque()
     it = iter(ordered)
     ok = False
@@ -213,7 +262,8 @@ def _parallel_runs(bars, ordered: Sequence[Params], fee_profile, start, end, gat
 
 
 def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], fee_profile: str | Mapping,
-             start: date, end: date, gate: Mapping | None, sink, jobs: int = 1) -> list[dict]:
+             start: date, end: date, gate: Mapping | None, sink, jobs: int = 1,
+             funding: pd.DataFrame | None = None) -> list[dict]:
     """run 별 생성 → 비용 → `sink.write(strategy_id, net)` → 요약. (strategy_id, param_id) 정렬 요약 목록을 돌려준다.
 
     `[start, end)` 반열린 구간. params 를 (strategy_id, param_id) 로 stable 정렬해 실행하고 run 내 `trade_id` 가
@@ -221,15 +271,16 @@ def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], fee_profile: str
     (실행한 트리거는 0행 parquet 라도 생긴다). net 프레임은 넘긴 뒤 버린다 — 누적은 싱크의 책임.
     `jobs ≥ 2` 면 run 계산을 spawn 프로세스 풀에서 하되 결과는 정렬 순서로 받아 싱크 쓰기는 이 프로세스에서만
     한다(`_parallel_runs`) — 출력은 `jobs=1` 과 같다. `_DiscardSink` 면 워커는 요약만 돌려준다.
+    `funding` 이 있으면 모든 run 에 펀딩을 적용한다(싱크는 `ROUNDTRIPS_NET_FUNDING` 스키마여야 한다).
     """
     if jobs < 1:
         raise ValueError(f"jobs 는 1 이상이어야 한다: {jobs}")
     ordered = sorted(params_list, key=lambda p: (p.strategy_id, p.param_id))
     keep_net = not isinstance(sink, _DiscardSink)
     if jobs >= 2 and len(ordered) >= 2:
-        results = _parallel_runs(bars, ordered, fee_profile, start, end, gate, keep_net, jobs)
+        results = _parallel_runs(bars, ordered, fee_profile, start, end, gate, keep_net, jobs, funding)
     else:
-        results = (_compute_run(bars, p, fee_profile, start, end, gate, keep_net) for p in ordered)
+        results = (_compute_run(bars, p, fee_profile, start, end, gate, keep_net, funding) for p in ordered)
     summaries = []
     t0 = time.monotonic()
     try:
@@ -309,7 +360,7 @@ def _with_run_key(summary: dict, sid, pid) -> dict:
 
 def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Sequence[Params],
                     gate: Mapping | None = None, sample=(SAMPLE_START, OOS_START),
-                    n_trials: int = N_TRIALS, jobs: int = 1) -> dict:
+                    n_trials: int = N_TRIALS, jobs: int = 1, funding: pd.DataFrame | None = None) -> dict:
     """폴드별 학습 그리드(`default`) → `select_params` → 검증 실행(`default`·`bybit`) → 이어 붙인 곡선·DSR 리포트.
 
     `load_bars(start, end)` 는 반열린 `[start, end)` UTC 자정 Timestamp 를 받아 1분봉을 돌려주는 주입 함수다.
@@ -317,17 +368,21 @@ def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Seq
     거래 0·현금 보유로 요약한다. V 는 표본 전체 `risk_pct = 1` run 기준, `selection` 은 `sample` 이 기본 표본
     전체일 때만 `make_selection` 결과(그 외 `None`). 반환 dict 의 NaN 은 float 그대로(JSON 변환은 호출자).
     `jobs` 는 학습·표본 전체 그리드 `run_grid` 에만 넘긴다(검증 run 1개는 순차).
+    `funding` 이 있으면 학습·검증·표본 전체 run 모두에 적용하고, 검증·곡선 요약에 펀딩 합계를 붙이며
+    선택 파일에 `funding: true` 를 넣는다(이어 붙이기는 32열 투영본, 곡선 합계 = 폴드 검증 합계의 합).
     """
     g = resolve_gate(gate)
     s, e = check_sample_range(*sample)
     _check_folds(folds, (s, e))
     by_key = {(p.strategy_id, p.param_id): p for p in params_list}
+    funded = funding is not None
 
     fold_reports = []
     test_nets: dict[str, list] = {name: [] for name in PROFILE_NAMES}
     for i, f in enumerate(folds, 1):
         bars = _load_range(load_bars, f.train_start, f.train_end)
-        train = run_grid(bars, params_list, "default", f.train_start, f.train_end, g, _DiscardSink(), jobs)
+        train = run_grid(bars, params_list, "default", f.train_start, f.train_end, g, _DiscardSink(), jobs,
+                         funding)
         del bars
         sel = select_params(train, g)
         test = {}
@@ -337,6 +392,8 @@ def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Seq
             empty = empty_frame(ROUNDTRIPS_NET)
             for name in PROFILE_NAMES:
                 test[name] = summarize_net_run(empty, f.test_start, f.test_end, g)
+                if funded:
+                    test[name].update(_empty_funding_totals())
                 test_nets[name].append(None)
         else:
             p = by_key[(sel["strategy_id"], sel["param_id"])]
@@ -344,13 +401,12 @@ def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Seq
                          "train_n_trades": sel["n_trades"], "train_mdd": sel["mdd"]}
             bars = _load_range(load_bars, f.test_start, f.test_end)
             res = generate_run(bars, p)
-            del bars
             for name in PROFILE_NAMES:
-                net = costs.apply_costs(res.roundtrips, name)
-                test[name] = _with_run_key(summarize_net_run(net, f.test_start, f.test_end, g),
-                                           p.strategy_id, p.param_id)
-                test_nets[name].append(net)
-            del res
+                net, summary = _net_and_summary(costs.apply_costs(res.roundtrips, name), f.test_start, f.test_end,
+                                                g, funding, bars)
+                test[name] = _with_run_key(summary, p.strategy_id, p.param_id)
+                test_nets[name].append(_project_net(net) if funded else net)
+            del res, bars  # 펀딩 mark 조회가 끝난 뒤 버린다
         fold_reports.append({
             "train_start": _fmt_day(f.train_start), "train_end": _fmt_day(f.train_end),
             "test_start": _fmt_day(f.test_start), "test_end": _fmt_day(f.test_end),
@@ -363,15 +419,19 @@ def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Seq
         rt = stitch_test_roundtrips(test_nets[name])
         stitched[name] = _with_run_key(summarize_net_run(rt, eval_start, eval_end, g),
                                        WALKFORWARD_STRATEGY_ID, WALKFORWARD_PARAM_ID)
+        if funded:
+            stitched[name].update(
+                n_funding=sum(fr["test"][name]["n_funding"] for fr in fold_reports),
+                total_funding_xbt=sum(fr["test"][name]["total_funding_xbt"] for fr in fold_reports))
     del test_nets
 
     bars = _load_range(load_bars, s, e)
-    full = run_grid(bars, params_list, "default", s, e, g, _DiscardSink(), jobs)
+    full = run_grid(bars, params_list, "default", s, e, g, _DiscardSink(), jobs, funding)
     del bars
     rv = representative_var(full, params_list)
     full_sel = select_params(full, g)
-    selection_file = make_selection(full_sel, g) if full_sel is not None and (s, e) == (SAMPLE_START, OOS_START) \
-        else None
+    selection_file = make_selection(full_sel, g, funding=funded) \
+        if full_sel is not None and (s, e) == (SAMPLE_START, OOS_START) else None
 
     dsr = {"var_sr": rv["var_sr"], "n_var_runs": rv["n_runs"], "n_var_finite": rv["n_finite"],
            "sr0": expected_max_sr(int(n_trials), rv["var_sr"])}
@@ -399,16 +459,25 @@ def store_loader(symbol: str, data_dir: Path) -> Callable:
     return load
 
 
-def walkforward_paths(out_dir: Path) -> dict[str, Path]:
+def _funding_label(name: str, funded: bool) -> str:
+    """산출 경로 이름: 펀딩 켜면 `<name>+funding`(설계 "펀딩 모델" 10항), 끄면 그대로."""
+    return name + FUNDING_SUFFIX if funded else name
+
+
+def walkforward_paths(out_dir: Path, funded: bool = False) -> dict[str, Path]:
     d = out_dir / "walkforward"
-    return {"json": d / "default.json", "md": d / "default.md", "selection": d / "selection.json"}
+    rep, sel = _funding_label("default", funded), _funding_label("selection", funded)
+    return {"json": d / f"{rep}.json", "md": d / f"{rep}.md", "selection": d / f"{sel}.json"}
 
 
-def build_walkforward_report(engine_report: Mapping, symbol: str, axes: dict) -> dict:
+def build_walkforward_report(engine_report: Mapping, symbol: str, axes: dict,
+                             funding_meta: Mapping | None = None) -> dict:
     meta = {
         "symbol": symbol, "ruleset_version": RULESET_VERSION, "grid": axes, "n_runs": engine_report["n_runs"],
         "fee": {name: costs.PROFILES[name] for name in PROFILE_NAMES}, "judge_profile": "default",
     }
+    if funding_meta is not None:
+        meta["funding"] = dict(funding_meta)
     return to_jsonable({"meta": meta, **engine_report})
 
 
@@ -421,11 +490,22 @@ def _row(cells) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
+def _curve_columns(meta: Mapping) -> tuple:
+    """워크포워드 검증 곡선·OOS 결과 표 열. 펀딩 켠 리포트만 끝에 `total_funding_xbt`."""
+    return WF_CURVE_COLUMNS + ("total_funding_xbt",) if "funding" in meta else WF_CURVE_COLUMNS
+
+
+def _unmodeled(meta: Mapping) -> str:
+    """경고 줄의 미모델링 문구. 펀딩 켠 리포트는 강제청산만."""
+    return "강제청산 미모델링(펀딩 반영 `--funding`)" if "funding" in meta else "펀딩·강제청산 미모델링"
+
+
 def render_walkforward_markdown(report: dict) -> str:
     """워크포워드 JSON 리포트 → 폴드 표·검증 곡선 3기준·DSR·최종 판정·bybit 민감도(사람이 읽을 용도)."""
     m, g, dsr = report["meta"], report["gate"], report["dsr"]
     s0, s1 = report["sample"]
     sel_file = report["full_sample"]["selection"]
+    curve_cols = _curve_columns(m)
     lines = [
         f"# 워크포워드 {m['symbol']} [{s0}, {s1}) · 판정 {m['judge_profile']}",
         "",
@@ -452,12 +532,12 @@ def render_walkforward_markdown(report: dict) -> str:
         "",
         "## 검증 곡선 3기준 (폴드 검증 구간 이어 붙임)",
         "",
-        _row(WF_CURVE_COLUMNS),
-        "|" + "---|" * len(WF_CURVE_COLUMNS),
+        _row(curve_cols),
+        "|" + "---|" * len(curve_cols),
     ]
     for name in PROFILE_NAMES:
         st = report["stitched"][name]
-        lines.append(_row([name] + [_cell(st.get(c)) for c in WF_CURVE_COLUMNS[1:]]))
+        lines.append(_row([name] + [_cell(st.get(c)) for c in curve_cols[1:]]))
     lines += [
         "",
         "## DSR",
@@ -477,14 +557,15 @@ def render_walkforward_markdown(report: dict) -> str:
         "## 선택 파일",
         "",
     ]
+    sel_name = f"{_funding_label('selection', 'funding' in m)}.json"
     if sel_file:
-        lines.append(f"- `selection.json`: {sel_file['strategy_id']} / {sel_file['param_id']}"
+        lines.append(f"- `{sel_name}`: {sel_file['strategy_id']} / {sel_file['param_id']}"
                      f" · sha256 `{sel_file['sha256'][:12]}`")
     else:
-        lines.append("- 선택 없음 — selection.json 미작성, OOS 진행 불가")
+        lines.append(f"- 선택 없음 — {sel_name} 미작성, OOS 진행 불가")
     lines += [
         "",
-        "- ⚠ 펀딩·강제청산 미모델링. 실거래 전환은 사람이 판단한다.",
+        f"- ⚠ {_unmodeled(m)}. 실거래 전환은 사람이 판단한다.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -520,13 +601,14 @@ def read_selection(path: Path) -> dict:
     return sel
 
 
-def walkforward_context(selection_path: Path, sha: str) -> dict:
-    """선택 파일 옆 워크포워드 리포트(`default.json`)에서 DSR 의 V 와 워크포워드 판정을 읽는다.
+def walkforward_context(selection_path: Path, sha: str, funded: bool = False) -> dict:
+    """선택 파일 옆 워크포워드 리포트(`default.json`, 펀딩 선택이면 `default+funding.json`)에서 DSR 의 V 와
+    워크포워드 판정을 읽는다.
 
     그 리포트의 `full_sample.selection.sha256` 이 `sha` 와 같을 때만 값을 쓴다. 없거나·읽을 수 없거나·sha256 이
     다르면 V = NaN·판정 None(+ 경고). OOS DSR 은 참고값이라 실패 사유가 아니다.
     """
-    path = Path(selection_path).parent / "default.json"
+    path = Path(selection_path).parent / f"{_funding_label('default', funded)}.json"
     none = {"report": None, "var_sr": float("nan"), "verdict": None}
     try:
         rep = json.loads(path.read_text(encoding="utf-8"))
@@ -543,22 +625,32 @@ def walkforward_context(selection_path: Path, sha: str) -> dict:
 
 
 def run_oos(selection: Mapping, params: Params, load_bars: Callable, log_path, wf_ctx: Mapping,
-            n_trials: int = N_TRIALS) -> dict:
+            n_trials: int = N_TRIALS, funding: pd.DataFrame | None = None) -> dict:
     """OOS [2022-01-01, 2025-01-01) 바 → 선택 run 1개 → `default`·`bybit` 비용 → 요약 → `evaluate_oos`(로그 append).
 
     모든 계산이 끝난 뒤 마지막에 `evaluate_oos` 를 한 번 부른다 — 그 전 실패는 로그를 남기지 않는다.
     판정 = `evaluate_oos` 반환(default 3기준), bybit 는 병기. DSR 은 참고값(판정 미반영).
+    `funding` 이 있으면 두 프로필 모두 펀딩을 적용하고(평가는 32열 투영본) 결과 요약에 펀딩 합계를 붙인다.
     """
     g = selection["gate"]
     bars = _load_range(load_bars, OOS_START, OOS_END)
     res = generate_run(bars, params)
-    del bars
-    nets = {name: costs.apply_costs(res.roundtrips, name) for name in PROFILE_NAMES}
-    del res
+    nets, totals = {}, {}
+    for name in PROFILE_NAMES:
+        net = costs.apply_costs(res.roundtrips, name)
+        if funding is not None:
+            net = costs.apply_funding(net, funding, bars)
+            totals[name] = _funding_totals(net)
+            net = _project_net(net)
+        nets[name] = net
+    del res, bars  # 펀딩 mark 조회가 끝난 뒤 버린다
     bybit = _with_run_key(summarize_net_run(nets["bybit"], OOS_START, OOS_END, g),
                           params.strategy_id, params.param_id)
     v = float(wf_ctx["var_sr"])
     default = walkforward.evaluate_oos(selection, nets["default"], log_path)  # 유일한 로그 쓰기
+    if funding is not None:
+        default.update(totals["default"])
+        bybit.update(totals["bybit"])
     results = {"default": default, "bybit": bybit}
     dsr = {"var_sr": v, "sr0": expected_max_sr(int(n_trials), v), "source": wf_ctx["report"]}
     for name in PROFILE_NAMES:
@@ -574,10 +666,12 @@ def run_oos(selection: Mapping, params: Params, load_bars: Callable, log_path, w
     }
 
 
-def build_oos_report(engine_report: Mapping, symbol: str, axes: dict) -> dict:
+def build_oos_report(engine_report: Mapping, symbol: str, axes: dict, funding_meta: Mapping | None = None) -> dict:
     """실행 시각은 넣지 않는다(결정적 — 시각은 접근 로그에만)."""
     meta = {"symbol": symbol, "ruleset_version": RULESET_VERSION, "grid": axes,
             "fee": {name: costs.PROFILES[name] for name in PROFILE_NAMES}, "judge_profile": "default"}
+    if funding_meta is not None:
+        meta["funding"] = dict(funding_meta)
     return to_jsonable({"meta": meta, **engine_report})
 
 
@@ -588,6 +682,7 @@ def render_oos_markdown(report: dict) -> str:
     """OOS JSON 리포트 → 결과 표·OOS 판정·bybit 병기·DSR 참고값·Phase 4 자격(사람이 읽을 용도)."""
     m, g, dsr, sel = report["meta"], report["gate"], report["dsr"], report["selection"]
     o0, o1 = report["oos"]
+    curve_cols = _curve_columns(m)
     lines = [
         f"# OOS 1회 {m['symbol']} [{o0}, {o1}) · 판정 {m['judge_profile']}",
         "",
@@ -599,14 +694,15 @@ def render_oos_markdown(report: dict) -> str:
         "",
         "## 결과",
         "",
-        _row(WF_CURVE_COLUMNS),
-        "|" + "---|" * len(WF_CURVE_COLUMNS),
+        _row(curve_cols),
+        "|" + "---|" * len(curve_cols),
     ]
     for name in PROFILE_NAMES:
         r = report["results"][name]
-        lines.append(_row([name] + [_cell(r.get(c)) for c in WF_CURVE_COLUMNS[1:]]))
+        lines.append(_row([name] + [_cell(r.get(c)) for c in curve_cols[1:]]))
     if dsr["var_sr"] is None:
-        dsr_lines = ["- V 없음 — 같은 sha256 의 워크포워드 리포트(선택 파일 옆 `default.json`)를 찾지 못했다"]
+        dsr_lines = ["- V 없음 — 같은 sha256 의 워크포워드 리포트(선택 파일 옆"
+                     f" `{_funding_label('default', 'funding' in m)}.json`)를 찾지 못했다"]
     else:
         dsr_lines = [f"- V = {_cell(dsr['var_sr'])} (출처 `{dsr['source']}`) · SR0 = {_cell(dsr['sr0'])}",
                      f"- DSR default = {_cell(dsr['default'])} · bybit = {_cell(dsr['bybit'])}"]
@@ -633,7 +729,7 @@ def render_oos_markdown(report: dict) -> str:
         f"- {PHASE4_TEXT}",
         f"- 이번 결과: {elig_text}",
         "",
-        "- ⚠ 펀딩·강제청산 미모델링. OOS 는 한 선택으로 한 번만 본다 — 접근 로그 가드 해제는 사람 판단.",
+        f"- ⚠ {_unmodeled(m)}. OOS 는 한 선택으로 한 번만 본다 — 접근 로그 가드 해제는 사람 판단.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -644,7 +740,7 @@ def write_oos_outputs(paths: Mapping[str, Path], report: dict) -> None:
 
 
 def build_report(start: date, end: date, symbol: str, bars: pd.DataFrame, axes: dict, fee_profile: str,
-                 gate: dict, summaries: list[dict]) -> dict:
+                 gate: dict, summaries: list[dict], funding_meta: Mapping | None = None) -> dict:
     n = len(bars)
     verdicts = [s["gate"] for s in summaries]
     meta = {
@@ -657,6 +753,8 @@ def build_report(start: date, end: date, symbol: str, bars: pd.DataFrame, axes: 
         "n_pass": verdicts.count("pass"), "n_fail": verdicts.count("fail"),
         "n_insufficient": verdicts.count("insufficient"),
     }
+    if funding_meta is not None:
+        meta["funding"] = dict(funding_meta)
     return to_jsonable({"meta": meta, "runs": summaries})
 
 
@@ -664,6 +762,7 @@ def render_markdown(report: dict) -> str:
     """JSON 리포트 → run 별 핵심 지표 표와 통과 run 수(사람이 읽을 용도)."""
     m = report["meta"]
     g, f = m["gate"], m["fee"]
+    cols = MD_COLUMNS + FUNDING_MD_COLUMNS if "funding" in m else MD_COLUMNS
     lines = [
         f"# 백테스트 {m['symbol']} [{m['start']}, {m['end']}) · {m['fee_profile']}",
         "",
@@ -674,23 +773,47 @@ def render_markdown(report: dict) -> str:
         f"- 게이트 기준: 거래 ≥ {g['min_trades']} · Sharpe ≥ {g['min_sharpe']} · MDD ≤ {g['max_drawdown']}"
         f" (워크포워드 DSR ≥ {g['min_dsr']})",
         f"- **통과 run {m['n_pass']}/{m['n_runs']}** (fail {m['n_fail']} · insufficient {m['n_insufficient']})",
-        "- ⚠ 단일 구간 3기준 판정이다. 최종 판정 아님 — 워크포워드·DSR 필요. 펀딩·강제청산 미모델링.",
+        f"- ⚠ 단일 구간 3기준 판정이다. 최종 판정 아님 — 워크포워드·DSR 필요. {_unmodeled(m)}.",
         "- 단위: mdd·total_net_ret·total_gross_ret 비율(0.01 = 1%), sharpe 연환산(√365).",
         "",
-        "| " + " | ".join(MD_COLUMNS) + " |",
-        "|" + "---|" * len(MD_COLUMNS),
+        "| " + " | ".join(cols) + " |",
+        "|" + "---|" * len(cols),
     ]
     for r in report["runs"]:
-        lines.append("| " + " | ".join(_cell(r.get(c)) for c in MD_COLUMNS) + " |")
+        lines.append("| " + " | ".join(_cell(r.get(c)) for c in cols) + " |")
     return "\n".join(lines) + "\n"
 
 
-def output_paths(out_dir: Path, fee_profile: str, start: date, end: date, strategy_ids) -> dict[str, Path]:
-    span = _span(start, end)
-    paths = {sid: out_dir / "roundtrips_net" / fee_profile / sid / f"{span}.parquet" for sid in strategy_ids}
-    paths["json"] = out_dir / "summary" / fee_profile / f"{span}.json"
-    paths["md"] = out_dir / "summary" / fee_profile / f"{span}.md"
+def output_paths(out_dir: Path, fee_profile: str, start: date, end: date, strategy_ids,
+                 funded: bool = False) -> dict[str, Path]:
+    span, label = _span(start, end), _funding_label(fee_profile, funded)
+    paths = {sid: out_dir / "roundtrips_net" / label / sid / f"{span}.parquet" for sid in strategy_ids}
+    paths["json"] = out_dir / "summary" / label / f"{span}.json"
+    paths["md"] = out_dir / "summary" / label / f"{span}.md"
     return paths
+
+
+def _load_checked_funding(symbol: str, start, end, funding_dir: Path) -> tuple[pd.DataFrame, dict]:
+    """평가 구간 `[start, end)` 펀딩 로드 + 격자 결측 검사(설계 "펀딩 모델" 5항, run 계산·바 로드 전에 1회).
+
+    파일 없음 `FileNotFoundError`, 스키마 위반 `SchemaError`, 격자 시각(04·12·20 UTC) 결측·NaN 이 하나라도 있으면
+    `ValueError`(→ CLI 종료코드 1). 격자 밖 행(`off_grid`)은 경고만 — 데이터 `ts` 대로 부과한다(1항).
+    반환 meta = 리포트 `meta.funding`(`source` 파일 경로·`n_settlements` 구간 정산 행 수).
+    """
+    df = bitmex_funding.load_funding(symbol, start, end, funding_dir)
+    gaps = bitmex_funding.check_funding_gaps(df, start, end)
+    missing = [gap.ts for gap in gaps if gap.kind == "missing"]
+    off_grid = [gap.ts for gap in gaps if gap.kind == "off_grid"]
+    if missing:
+        shown = ", ".join(str(t) for t in missing[:FUNDING_GAP_SHOW])
+        raise ValueError(f"펀딩 결측 {len(missing)}건 [{start}, {end}): {shown}"
+                         + (" …" if len(missing) > FUNDING_GAP_SHOW else ""))
+    if off_grid:
+        log.warning("펀딩 격자 밖 정산 %d건(데이터 ts 대로 부과): %s", len(off_grid),
+                    ", ".join(str(t) for t in off_grid[:FUNDING_GAP_SHOW]))
+    meta = {"source": str(bitmex_funding.funding_path(funding_dir, symbol)), "n_settlements": len(df)}
+    log.info("펀딩 %d건 로드 [%s, %s): %s", len(df), start, end, meta["source"])
+    return df, meta
 
 
 def write_outputs(paths: Mapping[str, Path], report: dict) -> None:
@@ -727,6 +850,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jobs", type=int, default=1, metavar="N",
                    help="run 병렬 프로세스 수 (기본 1 = 순차). 워커마다 bars 사본을 들므로 메모리 ≈ N × bars."
                         " 결과는 N 과 무관하게 같다. --oos-final 은 run 1개라 효과 없음")
+    p.add_argument("--funding", action="store_true",
+                   help="펀딩 비용 반영(기본 끔). 실행 전 평가 구간 펀딩 결측 검사(결측 → 종료코드 1), 산출 경로"
+                        " <fee_profile>+funding·selection+funding.json, 선택 파일 funding: true")
+    p.add_argument("--funding-dir", type=Path, default=None, metavar="PATH",
+                   help=f"펀딩 parquet 디렉터리 (기본 {bitmex_funding.DEFAULT_FUNDING_DIR}, --funding 과만)")
     return p
 
 
@@ -736,6 +864,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     a = parser.parse_args(argv)
     if a.jobs < 1:
         parser.error(f"--jobs 는 1 이상이어야 한다: {a.jobs}")
+    if a.funding_dir is not None and not a.funding:
+        parser.error("--funding-dir 는 --funding 과 함께만 쓴다")
+    if a.funding_dir is None:
+        a.funding_dir = bitmex_funding.DEFAULT_FUNDING_DIR
     if a.oos_final is not None:
         if a.walkforward:
             parser.error("--oos-final 은 --walkforward 와 함께 쓸 수 없다")
@@ -768,13 +900,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     gate = resolve_gate(None)
 
     t0 = time.monotonic()
+    funding = fmeta = None
     try:
+        if a.funding:  # 결측 검사는 바 로드·run 계산 전에(설계 "펀딩 모델" 5항)
+            funding, fmeta = _load_checked_funding(a.symbol, a.start, a.end, a.funding_dir)
         bars = load_bars(a.start, a.end - timedelta(days=1), a.symbol, out_dir=a.data_dir)  # store 는 종료일 포함
         log.info("1분봉 %d개 로드, run %d개 실행 (fee %s)", len(bars), len(params_list), a.fee_profile)
-        paths = output_paths(a.out, a.fee_profile, a.start, a.end, sorted({p.strategy_id for p in params_list}))
-        with RoundtripSink(paths) as sink:
-            summaries = run_grid(bars, params_list, a.fee_profile, a.start, a.end, gate, sink, a.jobs)
-            report = build_report(a.start, a.end, a.symbol, bars, axes, a.fee_profile, gate, summaries)
+        paths = output_paths(a.out, a.fee_profile, a.start, a.end, sorted({p.strategy_id for p in params_list}),
+                             funded=a.funding)
+        schema = ROUNDTRIPS_NET_FUNDING if a.funding else ROUNDTRIPS_NET
+        with RoundtripSink(paths, schema) as sink:
+            summaries = run_grid(bars, params_list, a.fee_profile, a.start, a.end, gate, sink, a.jobs, funding)
+            report = build_report(a.start, a.end, a.symbol, bars, axes, a.fee_profile, gate, summaries, fmeta)
             sink.commit()
         write_outputs(paths, report)
     except Exception:
@@ -786,11 +923,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _main_walkforward(a: argparse.Namespace, axes: dict, params_list: Sequence[Params]) -> int:
     t0 = time.monotonic()
-    paths = walkforward_paths(a.out)
+    paths = walkforward_paths(a.out, funded=a.funding)
+    funding = fmeta = None
     try:
+        if a.funding:  # 폴드 학습·검증 합집합 = 기본 표본 전체를 실행 전에 한 번 검사
+            funding, fmeta = _load_checked_funding(a.symbol, SAMPLE_START, OOS_START, a.funding_dir)
         engine = run_walkforward(make_folds(), store_loader(a.symbol, a.data_dir), params_list,
-                                 gate=resolve_gate(None), jobs=a.jobs)
-        report = build_walkforward_report(engine, a.symbol, axes)
+                                 gate=resolve_gate(None), jobs=a.jobs, funding=funding)
+        report = build_walkforward_report(engine, a.symbol, axes, fmeta)
         write_walkforward_outputs(paths, report)
     except Exception:
         log.exception("워크포워드 실패")
@@ -804,6 +944,9 @@ def _main_oos(parser: argparse.ArgumentParser, a: argparse.Namespace, axes: dict
     log_path = a.oos_log or OOS_LOG_PATH
     try:
         selection = read_selection(a.oos_final)
+        if selection.get("funding", False) != a.funding:  # 데이터·로그 접근 전에(설계 "펀딩 모델" 10항)
+            raise ValueError(f"선택 파일 funding={selection.get('funding', False)!r} 와 --funding={a.funding} 이"
+                             " 다르다 — 선택을 만든 워크포워드 실행과 같은 펀딩 설정으로 실행해라")
         walkforward.authorize_oos(selection, log_path)  # 쓰기 없음(조기 거부용)
     except (OSError, ValueError) as e:  # PermissionError(로그) ⊂ OSError, JSONDecodeError ⊂ ValueError
         parser.error(f"--oos-final {a.oos_final}: {e}")
@@ -814,17 +957,21 @@ def _main_oos(parser: argparse.ArgumentParser, a: argparse.Namespace, axes: dict
                      "--grid 를 선택을 만든 워크포워드 실행과 같게 줘라")
     sha = selection["sha256"]
     paths = oos_paths(a.out, sha)
-    wf_ctx = walkforward_context(a.oos_final, sha)
+    wf_ctx = walkforward_context(a.oos_final, sha, funded=a.funding)
     t0 = time.monotonic()
+    funding = fmeta = None
     try:
-        engine = run_oos(selection, params, store_loader(a.symbol, a.data_dir), log_path, wf_ctx)
+        if a.funding:  # OOS 전체를 바 로드 전에 한 번 검사(결측이면 1, 접근 로그 미기록)
+            funding, fmeta = _load_checked_funding(a.symbol, OOS_START, OOS_END, a.funding_dir)
+        engine = run_oos(selection, params, store_loader(a.symbol, a.data_dir), log_path, wf_ctx,
+                         funding=funding)
     except PermissionError as e:  # 데이터를 읽는 사이 로그에 다른 sha256 이 생김 → 거부(로그 미기록)
         parser.error(f"OOS 접근 로그 {log_path}: {e}")
     except Exception:
         log.exception("OOS 실행 실패(접근 로그 미기록)")
         return 1
     try:
-        report = build_oos_report(engine, a.symbol, axes)
+        report = build_oos_report(engine, a.symbol, axes, fmeta)
         write_oos_outputs(paths, report)
     except Exception:
         log.exception("OOS 리포트 쓰기 실패 — 접근 로그는 기록됨, 같은 선택으로 재실행하면 복구된다")
