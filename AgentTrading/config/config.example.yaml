@@ -1,8 +1,8 @@
 # AgentTrading 설정 예시 — 복사해서 config/config.yaml 로 쓰고, 키는 .env 에 둔다.
 
 ingest:
-  # Phase 0에서 확정. 확정 전까지 비워둔다.
-  sources: []
+  # 확정: bitmex_public (시장 체결 테이프). 워뇨띠 행동 데이터 소스는 Phase 0 조사 중.
+  sources: [bitmex_public]
   out_dir: data/raw
 
 backtest:

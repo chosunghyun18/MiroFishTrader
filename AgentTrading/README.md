@@ -35,7 +35,23 @@ AgentTrading/
 
 ## 상태
 
-Phase 0 — 스캐폴드만 있음. 데이터 소스 조사부터 시작.
+Phase 0 — 데이터 소스 조사 중. BitMEX 공개 체결 장부 확인·다운로더 완료 (`src/ingest/bitmex_public.py`).
+
+## 데이터 — BitMEX 공개 거래 장부
+
+`https://s3-eu-west-1.amazonaws.com/public.bitmex.com/data/trade/` 의 일별 `YYYYMMDD.csv.gz`
+(전 종목 체결, 총 ~50GB). **익명 테이프**라 개인 체결 추출은 불가 — 시장 데이터(백테스트 입력)로 쓴다.
+
+```bash
+# 위치·용량·스키마·적재 가능 여부 확인 (다운로드 없음)
+python -m src.ingest.bitmex_public inspect --start 2018-01-01 --end 2020-12-31
+
+# 다운로드 — 이어받기·크기/gzip 검증·용량 가드. --symbols 지정 시 해당 종목만 남기고 원본 삭제
+python -m src.ingest.bitmex_public download --start 2019-06-01 --end 2019-06-30 --symbols XBTUSD
+```
+
+기본 상한 `--max-gb 5`, 다운로드 후 최소 여유 `--min-free-gb 20`. 넘으면 시작 전에 거부한다.
+저장 위치 `data/raw/bitmex/<dataset>/` (커밋 금지).
 
 로드맵과 단계별 완료 기준은 Obsidian `Projects/work/AgentTrading/task/todo.md` 참고.
 
