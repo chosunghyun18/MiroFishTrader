@@ -17,3 +17,11 @@ shared/
 
 # MiroFish 업스트림 (별도 외부 도구 — work repo가 추적하지 않음)
 /MiroFish/
+
+# IdeaHub 아이디어 프로젝트 (각자 독립 레포 — work repo가 추적하지 않음)
+/ShortsSourceFinder/
+/OtpAutofill/
+/HolidayTimeChecker/
+/MyGithub/
+/JavaLineRunner/
+/AgentPay/
