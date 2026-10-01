@@ -37,8 +37,9 @@ AgentTrading/
 
 Phase 1(수집 파이프라인) 종료 2026-10-02 — 시장 데이터(BitMEX XBTUSD) 기준. BitMEX 공개 체결 다운로더(`src/ingest/bitmex_public.py`),
 정규화 파서·1분봉 리샘플·증분 정규화 CLI(`src/ingest/normalize.py`)·구간 로더(`src/ingest/store.py`) 완료.
-Phase 2(패턴 정량화) 진행 중 — 1분봉 지표(`features`)·합성 전략 생성기(`synthetic`)·분포 지표(`patterns`)·분석 CLI(`run`) 완료.
-다음: 실데이터 구간으로 분포 산출(T-20261002-16). 행동 표본은 합성 전략, aoa 원본은 진위 확인 후 조건부.
+Phase 2(패턴 정량화) 종료 2026-10-02 — 합성 전략 기준. 1분봉 지표(`features`)·합성 전략 생성기(`synthetic`)·분포 지표(`patterns`)·분석 CLI(`run`),
+실데이터 2구간(XBTUSD 2019-06-01~07·2020-03) 전체 그리드 분포 산출 완료.
+다음: Phase 3 백테스트(`src/backtest`). 행동 표본은 합성 전략, aoa 원본은 진위 확인 후 조건부.
 
 ## 데이터 — BitMEX 공개 거래 장부
 
