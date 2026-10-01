@@ -1,7 +1,8 @@
-"""정규화 테이블 스키마(trades, bars_1m, fills)와 DataFrame 검증.
+"""정규화·분석 테이블 스키마(trades, bars_1m, fills, roundtrips)와 DataFrame 검증.
 
 파서(ingest)·리샘플·분석 모듈은 컬럼·dtype 정의를 여기서만 가져온다.
 설계 근거(단일 기준): Obsidian `Projects/work/AgentTrading/design/phase1-ingest-schema.md`
+(roundtrips 는 `design/phase2-synthetic-strategy.md` "라운드트립 스키마").
 문서와 이 파일이 다르면 문서를 따르고, 문서를 먼저 고친 뒤 이 파일을 맞춘다.
 
     from src.shared.schema import TRADES, validate_trades, empty_frame
@@ -23,9 +24,13 @@ UTC_NS = pd.DatetimeTZDtype("ns", "UTC")
 STRING = "string"
 INT64 = "int64"
 FLOAT64 = "float64"
+BOOL = "bool"
 
 SIDES = frozenset({"buy", "sell"})
 SOURCES = frozenset({"aoa", "synthetic"})
+RT_SIDES = frozenset({"long", "short"})
+ENTRY_REASONS = frozenset({"h1_breakout", "h2_momentum", "h3_meanrev"})
+EXIT_REASONS = frozenset({"stop", "take_profit", "time", "end_of_data"})
 
 
 class SchemaError(ValueError):
@@ -35,7 +40,7 @@ class SchemaError(ValueError):
 @dataclass(frozen=True)
 class ColumnSpec:
     name: str
-    dtype: object  # UTC_NS | "string" | "int64" | "float64"
+    dtype: object  # UTC_NS | "string" | "int64" | "float64" | "bool"
     nullable: bool = False
     allowed: frozenset[str] | None = None
 
@@ -112,6 +117,39 @@ FILLS = TableSchema(
     ),
     key=("source", "source_id"),
     key_exempt=(("source", "aoa"),),
+)
+
+# 라운드트립(진입 1회 + 청산 1회 = 1행). 설계 근거: phase2-synthetic-strategy.md "라운드트립 스키마".
+# entry_reason 허용값은 aoa 확장 시 추가한다.
+ROUNDTRIPS = TableSchema(
+    name="roundtrips",
+    columns=(
+        ColumnSpec("strategy_id", STRING),
+        ColumnSpec("param_id", STRING),
+        ColumnSpec("trade_id", INT64),
+        ColumnSpec("symbol", STRING),
+        ColumnSpec("side", STRING, allowed=RT_SIDES),
+        ColumnSpec("signal_ts", UTC_NS),
+        ColumnSpec("entry_ts", UTC_NS),
+        ColumnSpec("entry_price", FLOAT64),
+        ColumnSpec("exit_signal_ts", UTC_NS, nullable=True),
+        ColumnSpec("exit_ts", UTC_NS),
+        ColumnSpec("exit_price", FLOAT64),
+        ColumnSpec("qty", INT64),
+        ColumnSpec("stop_price", FLOAT64),
+        ColumnSpec("tp_price", FLOAT64, nullable=True),
+        ColumnSpec("entry_reason", STRING, allowed=ENTRY_REASONS),
+        ColumnSpec("exit_reason", STRING, allowed=EXIT_REASONS),
+        ColumnSpec("holding_min", FLOAT64),
+        ColumnSpec("equity_before", FLOAT64),
+        ColumnSpec("notional_usd", FLOAT64),
+        ColumnSpec("leverage", FLOAT64),
+        ColumnSpec("risk_pct", FLOAT64),
+        ColumnSpec("size_capped", BOOL),
+        ColumnSpec("gross_pnl_xbt", FLOAT64),
+        ColumnSpec("gross_ret", FLOAT64),
+    ),
+    key=("strategy_id", "param_id", "trade_id"),
 )
 
 
@@ -193,6 +231,10 @@ def validate_bars_1m(df: pd.DataFrame) -> pd.DataFrame:
 
 def validate_fills(df: pd.DataFrame) -> pd.DataFrame:
     return validate(df, FILLS)
+
+
+def validate_roundtrips(df: pd.DataFrame, strict: bool = True) -> pd.DataFrame:
+    return validate(df, ROUNDTRIPS, strict=strict)
 
 
 def empty_frame(schema: TableSchema) -> pd.DataFrame:

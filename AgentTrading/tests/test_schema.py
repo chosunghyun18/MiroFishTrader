@@ -225,3 +225,43 @@ def test_parquet_roundtrip(tmp_path, make, fn):
     assert back["ts"].equals(df["ts"])
     assert back["ts"].iloc[0].nanosecond == df["ts"].iloc[0].nanosecond
     pd.testing.assert_frame_equal(back, df, check_dtype=False)
+
+
+# phase2-synthetic-strategy.md "라운드트립 스키마" 표에서 옮긴 기대값
+B = "bool"
+DOC_ROUNDTRIPS = [
+    ("strategy_id", S, False), ("param_id", S, False), ("trade_id", I, False),
+    ("symbol", S, False), ("side", S, False), ("signal_ts", U, False), ("entry_ts", U, False),
+    ("entry_price", F, False), ("exit_signal_ts", U, True), ("exit_ts", U, False),
+    ("exit_price", F, False), ("qty", I, False), ("stop_price", F, False), ("tp_price", F, True),
+    ("entry_reason", S, False), ("exit_reason", S, False), ("holding_min", F, False),
+    ("equity_before", F, False), ("notional_usd", F, False), ("leverage", F, False),
+    ("risk_pct", F, False), ("size_capped", B, False), ("gross_pnl_xbt", F, False),
+    ("gross_ret", F, False),
+]
+
+
+def test_roundtrips_definition_matches_doc():
+    got = [(c.name, "ts" if c.dtype is sc.UTC_NS else c.dtype, c.nullable)
+           for c in sc.ROUNDTRIPS.columns]
+    assert got == DOC_ROUNDTRIPS
+    assert len(sc.ROUNDTRIPS.columns) == 24
+    assert sc.ROUNDTRIPS.key == ("strategy_id", "param_id", "trade_id")
+    allowed = {c.name: c.allowed for c in sc.ROUNDTRIPS.columns if c.allowed is not None}
+    assert allowed == {
+        "side": {"long", "short"},
+        "entry_reason": {"h1_breakout", "h2_momentum", "h3_meanrev"},
+        "exit_reason": {"stop", "take_profit", "time", "end_of_data"},
+    }
+
+
+def test_roundtrips_bool_dtype():
+    empty = sc.empty_frame(sc.ROUNDTRIPS)
+    assert empty["size_capped"].dtype == np.dtype("bool")
+    assert sc.validate_roundtrips(empty) is empty
+    nullable_bool = empty.assign(size_capped=pd.array([], dtype="boolean"))
+    with pytest.raises(SchemaError, match="size_capped"):
+        sc.validate_roundtrips(nullable_bool)
+    as_object = empty.assign(size_capped=pd.Series([], dtype=object))
+    with pytest.raises(SchemaError, match="size_capped"):
+        sc.validate_roundtrips(as_object)
