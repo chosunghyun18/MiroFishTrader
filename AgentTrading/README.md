@@ -36,7 +36,7 @@ AgentTrading/
 ## 상태
 
 Phase 1 — 데이터 적재 진행 중. BitMEX 공개 체결 다운로더(`src/ingest/bitmex_public.py`),
-정규화 파서·1분봉 리샘플·증분 정규화 CLI(`src/ingest/normalize.py`) 완료.
+정규화 파서·1분봉 리샘플·증분 정규화 CLI(`src/ingest/normalize.py`)·구간 로더(`src/ingest/store.py`) 완료.
 
 ## 데이터 — BitMEX 공개 거래 장부
 
@@ -71,6 +71,18 @@ python -m src.ingest.normalize --start 2019-06-01 --end 2019-06-30 --symbol XBTU
 - 중복: `trdMatchID` 기준 첫 행만 남기고, 다시 처리할 때는 그날 파일을 통째로 다시 쓴다.
 - 강제 재처리: manifest 파일(또는 그 안의 날짜 항목)을 지우고 다시 실행.
 - 처리 오류(그날 밖 체결·스키마 위반 등)는 즉시 종료코드 1. 그 전까지 끝난 날은 유지된다.
+
+읽기 — 구간(양끝 포함 UTC 일)을 한 프레임으로 읽고 스키마 검증까지 한다.
+
+```python
+from datetime import date
+from src.ingest.store import load_bars, load_trades, missing_days
+bars = load_bars(date(2019, 6, 1), date(2019, 6, 30))         # ts 오름차순, validate 통과
+gaps = missing_days(date(2019, 6, 1), date(2019, 6, 30))      # 파일 없는 날 [date, ...]
+```
+
+- 결측 일이 있으면 기본은 `MissingDaysError`(`.days`). `allow_missing=True` 면 경고 후 있는 날만 읽는데,
+  결과가 끊긴 구간을 포함하므로 `missing_days` 로 연속 구간을 나눠 쓴다.
 
 로드맵과 단계별 완료 기준은 Obsidian `Projects/work/AgentTrading/task/todo.md` 참고.
 
