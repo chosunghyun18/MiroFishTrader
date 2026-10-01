@@ -39,7 +39,7 @@ Phase 1(수집 파이프라인) 종료 2026-10-02 — 시장 데이터(BitMEX XB
 정규화 파서·1분봉 리샘플·증분 정규화 CLI(`src/ingest/normalize.py`)·구간 로더(`src/ingest/store.py`) 완료.
 Phase 2(패턴 정량화) 종료 2026-10-02 — 합성 전략 기준. 1분봉 지표(`features`)·합성 전략 생성기(`synthetic`)·분포 지표(`patterns`)·분석 CLI(`run`),
 실데이터 2구간(XBTUSD 2019-06-01~07·2020-03) 전체 그리드 분포 산출 완료.
-다음: Phase 3 백테스트(`src/backtest`). 행동 표본은 합성 전략, aoa 원본은 진위 확인 후 조건부.
+Phase 3 진행 중 — 비용 모델(`costs`)·게이트 지표(`metrics`)·워크포워드(`walkforward`)·백테스트 CLI 기본 모드(`run`) 완료. 행동 표본은 합성 전략, aoa 원본은 진위 확인 후 조건부.
 
 ## 데이터 — BitMEX 공개 거래 장부
 
@@ -114,6 +114,29 @@ python -m src.analysis.run --start 2019-06-01 --end 2019-06-07 --symbol XBTUSD
 - 모든 손익 지표는 gross(수수료·슬리피지·펀딩 전). 같은 입력이면 같은 결과(JSON·MD 바이트 동일, 실행 시각은 로그에만).
 - `--grid` 로 일부 트리거만 돌리면 다른 트리거의 이전 roundtrips 파일은 지우지 않는다. 기준은 JSON 의 `meta.grid`·`runs`.
 - 전체 그리드는 run 마다 봉 순차 루프라 구간이 길면 오래 걸린다(벡터화·병렬화는 후속).
+
+## 백테스트 — Phase 3
+
+`python -m src.backtest.run` 은 정규화 1분봉 구간에서 합성 전략 그리드를 돌리고, 라운드트립에 수수료·슬리피지를
+적용(`costs`)한 뒤 run 별 net 지표(Sharpe·MDD·누적 수익)와 게이트 판정(`metrics`)을 저장한다.
+
+```bash
+# 구간은 반열린 [start, end) — --end 날짜는 포함하지 않는다(분석 CLI 와 다름)
+python -m src.backtest.run --start 2019-06-01 --end 2019-06-08 --symbol XBTUSD
+python -m src.backtest.run --start 2020-03-01 --end 2020-04-01 --fee-profile bybit
+# 옵션: --grid grid.json (분석 CLI 와 같은 형식, 생략 시 2,268 run)
+#       --fee-profile {default,bybit} (기본 default)
+#       --data-dir data/raw/normalized/bitmex (기본)  --out data/out/backtest (기본)
+```
+
+- 출력(`data/out/` 은 커밋 안 됨, 파일명 두 번째 날짜는 반열린 end):
+  - `<out>/roundtrips_net/<fee_profile>/<strategy_id>/<YYYYMMDD>_<YYYYMMDD>.parquet` — gross 24열 + net 8열
+  - `<out>/summary/<fee_profile>/<YYYYMMDD>_<YYYYMMDD>.json` — `meta`(구간·심볼·그리드·수수료 프로필 값·게이트 기준 4키·통과/실패/부족 수) + `runs`(run 별 요약 15키)
+  - 같은 이름 `.md` — run 별 핵심 지표 표와 통과 run 수
+- 기본 표본 [2018-03-01, 2022-01-01) 밖, OOS(2022-01-01 이후), 2025 이후, `start ≥ end` 는 데이터를 읽기 전에 거부(종료코드 2).
+- 결측 일이면 종료코드 1, 산출물은 쓰지 않는다. 같은 입력이면 JSON·MD 바이트 동일.
+- 게이트 기준은 코드 기본값(거래 ≥ 100 · Sharpe ≥ 1.0 · MDD ≤ 30%, DSR ≥ 0.95 는 워크포워드용)을 쓴다.
+- **최종 판정 아님** — 단일 구간 3기준 판정이다. 워크포워드·DSR(`--walkforward`)과 OOS 1회 평가(`--oos-final`)는 후속. 펀딩·강제청산 미모델링.
 
 로드맵과 단계별 완료 기준은 Obsidian `Projects/work/AgentTrading/task/todo.md` 참고.
 
