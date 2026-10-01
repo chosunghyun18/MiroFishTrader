@@ -7,11 +7,13 @@
 
     python -m src.backtest.run --start 2019-06-01 --end 2019-06-08 --symbol XBTUSD
     python -m src.backtest.run --start 2020-03-01 --end 2020-04-01 --grid grid.json --fee-profile bybit
+    python -m src.backtest.run --walkforward --grid grid.json
 
 | 출력 | 경로 |
 |---|---|
 | net 라운드트립 | `<out>/roundtrips_net/<fee_profile>/<strategy_id>/<YYYYMMDD>_<YYYYMMDD>.parquet` |
 | 요약 | `<out>/summary/<fee_profile>/<YYYYMMDD>_<YYYYMMDD>.json` + 같은 이름 `.md` |
+| 워크포워드(`--walkforward`) | `<out>/walkforward/default.json` + `.md`, 선택이 있으면 `<out>/walkforward/selection.json` |
 
 - 구간은 반열린 `[start, end)` UTC 자정 — `--end` 날짜는 포함하지 않는다(분석 CLI 의 종료일 포함과 다름).
   파일명의 두 번째 날짜도 반열린 end 다.
@@ -20,7 +22,11 @@
   (`RoundtripSink`, 메모리 상한 = 행 그룹 버퍼 + run 1개), 전체 성공 후에야 rename → JSON·MD 를 쓴다.
   실패하면 이번 실행의 `.tmp` 를 지우므로 최종 산출물이 없다.
 - 게이트 기준은 코드 기본값(`walkforward.resolve_gate(None)`, Spec 3절)을 meta 에 기록한다. 여기서의 판정은
-  단일 구간 3기준이며 최종 판정이 아니다(워크포워드·DSR 은 `--walkforward`, 후속 태스크).
+  단일 구간 3기준이며 최종 판정이 아니다(워크포워드·DSR 은 `--walkforward`).
+- `--walkforward`: 기본 표본 [2018-03-01, 2022-01-01) 고정 6폴드(`make_folds()`)로 `run_walkforward` 실행.
+  `--start`/`--end` 와 함께 쓰면 거부(종료코드 2), `--fee-profile` 은 `default` 만(판정 default·민감도 bybit 를
+  한 리포트에 담는다). 엔진이 끝까지 성공한 뒤에만 JSON → MD → selection.json 을 원자적으로 쓴다. 선택이 없으면
+  selection.json 을 쓰지 않고 이전 실행의 낡은 파일을 지운다. 실패(종료코드 1)·거부(2)면 기존 산출물은 그대로.
 - 결정성: 실행 시각·소요 시간은 파일에 넣지 않는다. 같은 입력이면 JSON·MD 바이트가 같다.
 """
 
@@ -47,8 +53,9 @@ from src.backtest import costs
 from src.backtest.metrics import summarize_net_run
 from src.backtest.walkforward import (N_TRIALS, OOS_START, SAMPLE_START, WALKFORWARD_PARAM_ID,
                                       WALKFORWARD_STRATEGY_ID, Fold, check_sample_range, deflated_sharpe,
-                                      expected_max_sr, make_selection, resolve_gate, select_params,
-                                      sr_variance, stitch_test_roundtrips, walkforward_verdict)
+                                      expected_max_sr, make_folds, make_selection, resolve_gate,
+                                      select_params, sr_variance, stitch_test_roundtrips,
+                                      walkforward_verdict)
 from src.ingest import normalize
 from src.ingest.store import load_bars
 from src.shared.schema import ROUNDTRIPS_NET, empty_frame, validate_roundtrips_net
@@ -304,6 +311,121 @@ def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Seq
     }
 
 
+def store_loader(symbol: str, data_dir: Path) -> Callable:
+    """반열린 `[start, end)` UTC 자정 Timestamp → `store.load_bars(start, end − 1일)`(store 는 종료일 포함)."""
+
+    def load(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        return load_bars(start.date(), (end - pd.Timedelta(days=1)).date(), symbol, out_dir=data_dir)
+
+    return load
+
+
+def walkforward_paths(out_dir: Path) -> dict[str, Path]:
+    d = out_dir / "walkforward"
+    return {"json": d / "default.json", "md": d / "default.md", "selection": d / "selection.json"}
+
+
+def build_walkforward_report(engine_report: Mapping, symbol: str, axes: dict) -> dict:
+    meta = {
+        "symbol": symbol, "ruleset_version": RULESET_VERSION, "grid": axes, "n_runs": engine_report["n_runs"],
+        "fee": {name: costs.PROFILES[name] for name in PROFILE_NAMES}, "judge_profile": "default",
+    }
+    return to_jsonable({"meta": meta, **engine_report})
+
+
+WF_FOLD_COLUMNS = ("폴드", "학습", "검증", "선택", "학습 Sharpe", "default 거래", "default Sharpe", "default MDD",
+                   "default net", "bybit net")
+WF_CURVE_COLUMNS = ("프로필", "n_trades", "sharpe", "mdd", "total_net_ret", "n_days", "gate")
+
+
+def _row(cells) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def render_walkforward_markdown(report: dict) -> str:
+    """워크포워드 JSON 리포트 → 폴드 표·검증 곡선 3기준·DSR·최종 판정·bybit 민감도(사람이 읽을 용도)."""
+    m, g, dsr = report["meta"], report["gate"], report["dsr"]
+    s0, s1 = report["sample"]
+    sel_file = report["full_sample"]["selection"]
+    lines = [
+        f"# 워크포워드 {m['symbol']} [{s0}, {s1}) · 판정 {m['judge_profile']}",
+        "",
+        f"- ruleset `{m['ruleset_version']}` · run {m['n_runs']}개 · 폴드 {len(report['folds'])}개"
+        f" · DSR 시행 수 N = {report['n_trials']}",
+        f"- 게이트 기준: 거래 ≥ {g['min_trades']} · Sharpe ≥ {g['min_sharpe']} · MDD ≤ {g['max_drawdown']}"
+        f" · DSR ≥ {g['min_dsr']}",
+        "- 단위: mdd·net 비율(0.01 = 1%), sharpe 연환산(√365). 학습 선택·판정은 default, bybit 는 민감도.",
+        "",
+        "## 폴드",
+        "",
+        _row(WF_FOLD_COLUMNS),
+        "|" + "---|" * len(WF_FOLD_COLUMNS),
+    ]
+    for i, f in enumerate(report["folds"], 1):
+        sel, d, b = f["selection"], f["test"]["default"], f["test"]["bybit"]
+        chosen = f"{sel['strategy_id']} / {sel['param_id']}" if sel else "선택 없음(현금)"
+        lines.append(_row([
+            str(i), f"[{f['train_start']}, {f['train_end']})", f"[{f['test_start']}, {f['test_end']})",
+            _cell(chosen), _cell(sel["train_sharpe"] if sel else None), _cell(d["n_trades"]), _cell(d["sharpe"]),
+            _cell(d["mdd"]), _cell(d["total_net_ret"]), _cell(b["total_net_ret"]),
+        ]))
+    lines += [
+        "",
+        "## 검증 곡선 3기준 (폴드 검증 구간 이어 붙임)",
+        "",
+        _row(WF_CURVE_COLUMNS),
+        "|" + "---|" * len(WF_CURVE_COLUMNS),
+    ]
+    for name in PROFILE_NAMES:
+        st = report["stitched"][name]
+        lines.append(_row([name] + [_cell(st.get(c)) for c in WF_CURVE_COLUMNS[1:]]))
+    lines += [
+        "",
+        "## DSR",
+        "",
+        f"- V(표본 전체 `risk_pct = 1` 대표 run sr_daily 분산) = {_cell(dsr['var_sr'])}"
+        f" (대표 run {dsr['n_var_runs']}개, 유한 {dsr['n_var_finite']}개) · SR0 = {_cell(dsr['sr0'])}",
+        f"- DSR default = {_cell(dsr['default'])} · bybit = {_cell(dsr['bybit'])} (기준 ≥ {g['min_dsr']})",
+        "",
+        "## 최종 판정",
+        "",
+        f"- **{report['verdict']}** (default: 검증 곡선 3기준 + DSR)",
+        "",
+        "## bybit 민감도",
+        "",
+        f"- {report['bybit_verdict']} (DSR {_cell(dsr['bybit'])}) — 판정에 쓰지 않는다",
+        "",
+        "## 선택 파일",
+        "",
+    ]
+    if sel_file:
+        lines.append(f"- `selection.json`: {sel_file['strategy_id']} / {sel_file['param_id']}"
+                     f" · sha256 `{sel_file['sha256'][:12]}`")
+    else:
+        lines.append("- 선택 없음 — selection.json 미작성, OOS 진행 불가")
+    lines += [
+        "",
+        "- ⚠ 펀딩·강제청산 미모델링. 실거래 전환은 사람이 판단한다.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _json_text(obj) -> str:
+    return json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+
+
+def write_walkforward_outputs(paths: Mapping[str, Path], report: dict) -> None:
+    """JSON → MD → (선택이 있으면) selection.json 원자적 쓰기. 선택이 없으면 낡은 selection.json 을 지운다."""
+    _write_text_atomic(_json_text(report), paths["json"])
+    _write_text_atomic(render_walkforward_markdown(report), paths["md"])
+    sel = report["full_sample"]["selection"]
+    if sel is not None:
+        _write_text_atomic(_json_text(sel), paths["selection"])
+    elif paths["selection"].exists():
+        log.warning("선택 없음 → 이전 실행의 %s 를 지운다(리포트와 어긋난 선택 방지)", paths["selection"])
+        paths["selection"].unlink()
+
+
 def build_report(start: date, end: date, symbol: str, bars: pd.DataFrame, axes: dict, fee_profile: str,
                  gate: dict, summaries: list[dict]) -> dict:
     n = len(bars)
@@ -365,9 +487,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m src.backtest.run",
         description="정규화 1분봉 [start, end) → 합성 전략 그리드 → 비용 → net 지표·게이트 리포트 (Phase 3)")
-    p.add_argument("--start", required=True, type=normalize._parse_date, help="YYYY-MM-DD (포함, UTC)")
-    p.add_argument("--end", required=True, type=normalize._parse_date,
-                   help="YYYY-MM-DD (미포함, UTC — 반열린 [start, end))")
+    p.add_argument("--start", type=normalize._parse_date, help="YYYY-MM-DD (포함, UTC). 기본 모드에서 필수")
+    p.add_argument("--end", type=normalize._parse_date,
+                   help="YYYY-MM-DD (미포함, UTC — 반열린 [start, end)). 기본 모드에서 필수")
     p.add_argument("--symbol", default="XBTUSD")
     p.add_argument("--grid", type=Path, default=None,
                    help="축 → 값 목록 JSON (설계 그리드 부분집합, 생략 시 전체 2,268 run)")
@@ -376,6 +498,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", type=Path, default=normalize.DEFAULT_OUT_DIR,
                    help=f"정규화 데이터 디렉터리 (기본 {normalize.DEFAULT_OUT_DIR})")
     p.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR, help=f"출력 디렉터리 (기본 {DEFAULT_OUT_DIR})")
+    p.add_argument("--walkforward", action="store_true",
+                   help="기본 표본 고정 6폴드 워크포워드 → walkforward/default.json·md + selection.json"
+                        " (--start/--end 불가, --fee-profile default 만)")
     return p
 
 
@@ -383,14 +508,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = build_parser()
     a = parser.parse_args(argv)
-    try:
-        check_sample_range(a.start, a.end)
-    except ValueError as e:
-        parser.error(str(e))
+    if a.walkforward:
+        if a.start is not None or a.end is not None:
+            parser.error("--walkforward 는 기본 표본 [2018-03-01, 2022-01-01) 고정 폴드라 --start/--end 를 받지 않는다")
+        if a.fee_profile != "default":
+            parser.error("--walkforward 는 --fee-profile default 만 받는다(bybit 민감도는 리포트에 함께 담긴다)")
+    else:
+        if a.start is None or a.end is None:
+            parser.error("--start 와 --end 가 필요하다(또는 --walkforward)")
+        try:
+            check_sample_range(a.start, a.end)
+        except ValueError as e:
+            parser.error(str(e))
     try:
         axes, params_list = load_grid(a.grid)
     except (OSError, ValueError) as e:  # json.JSONDecodeError 는 ValueError
         parser.error(f"--grid: {e}")
+    if a.walkforward:
+        return _main_walkforward(a, axes, params_list)
     gate = resolve_gate(None)
 
     t0 = time.monotonic()
@@ -407,6 +542,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.exception("백테스트 실패")
         return 1
     log.info("완료 (%.1fs): %s", time.monotonic() - t0, paths["json"])
+    return 0
+
+
+def _main_walkforward(a: argparse.Namespace, axes: dict, params_list: Sequence[Params]) -> int:
+    t0 = time.monotonic()
+    paths = walkforward_paths(a.out)
+    try:
+        engine = run_walkforward(make_folds(), store_loader(a.symbol, a.data_dir), params_list,
+                                 gate=resolve_gate(None))
+        report = build_walkforward_report(engine, a.symbol, axes)
+        write_walkforward_outputs(paths, report)
+    except Exception:
+        log.exception("워크포워드 실패")
+        return 1
+    log.info("완료 (%.1fs): %s 판정 %s", time.monotonic() - t0, paths["json"], report["verdict"])
     return 0
 
 
