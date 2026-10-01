@@ -1,0 +1,10 @@
+{
+  "name": "AgentTrading",
+  "dir": "AgentTrading",
+  "vault": "Projects/work/AgentTrading",
+  "ssot": ["AgentTrading Design Spec.md", "task/todo.md"],
+  "verify": ".venv/bin/pytest -q",
+  "setup": {"unless_exists": ".venv", "cmd": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt"},
+  "link": [".env", "config/config.yaml"],
+  "notes": "Phase 0(데이터 소스 조사)을 닫기 전에는 Phase 1~4 설계를 고정하지 않는다. 실거래 전환은 항상 사람이 판단한다(needs_human)."
+}

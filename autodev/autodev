@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# autodev 실행 래퍼 — 어디서 불러도 동작한다.
+exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/autodev.py" "$@"

@@ -1,0 +1,8 @@
+{
+  "name": "_Sandbox",
+  "dir": "autodev/sandbox",
+  "vault": "Private/업무 자동화/sandbox",
+  "ssot": [],
+  "verify": "python3 -m unittest discover -s tests -q",
+  "notes": "autodev 자체 점검용 샌드박스. 표준 라이브러리만 사용한다. 외부 의존성 설치 금지."
+}

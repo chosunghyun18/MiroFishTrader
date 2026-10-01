@@ -1,0 +1,10 @@
+{
+  "name": "MiroFishTrader",
+  "dir": "MiroFishTrader",
+  "vault": "Projects/work/MiroFishTrader",
+  "ssot": ["memory/INDEX.md", "memory/architecture/implementation.md", "task/todo.md"],
+  "verify": ".venv/bin/pytest -q",
+  "setup": {"unless_exists": ".venv", "cmd": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt"},
+  "link": [".env"],
+  "notes": "비용 최소화가 최우선. 무료 데이터 소스 우선, 외부 호출은 테스트에서 전부 가짜 객체로 대체한다. 로컬 LLM(Ollama)·MiroFish 엔진이 떠 있어야 하는 e2e 실행은 사람이 한다(needs_human)."
+}

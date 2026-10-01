@@ -25,3 +25,10 @@ shared/
 /MyGithub/
 /JavaLineRunner/
 /AgentPay/
+
+# autodev (자율 개발 루프) 런타임 산출물
+/autodev/logs/
+/autodev/STOP
+/autodev/__pycache__/
+# 세션 핸드오프 (자동 생성 — 기록 사본은 Obsidian 볼트에 쌓인다)
+.claude/handoff/
