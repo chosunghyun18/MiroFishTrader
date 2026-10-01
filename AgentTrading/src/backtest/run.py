@@ -8,12 +8,14 @@
     python -m src.backtest.run --start 2019-06-01 --end 2019-06-08 --symbol XBTUSD
     python -m src.backtest.run --start 2020-03-01 --end 2020-04-01 --grid grid.json --fee-profile bybit
     python -m src.backtest.run --walkforward --grid grid.json
+    python -m src.backtest.run --oos-final data/out/backtest/walkforward/selection.json --grid grid.json
 
 | 출력 | 경로 |
 |---|---|
 | net 라운드트립 | `<out>/roundtrips_net/<fee_profile>/<strategy_id>/<YYYYMMDD>_<YYYYMMDD>.parquet` |
 | 요약 | `<out>/summary/<fee_profile>/<YYYYMMDD>_<YYYYMMDD>.json` + 같은 이름 `.md` |
 | 워크포워드(`--walkforward`) | `<out>/walkforward/default.json` + `.md`, 선택이 있으면 `<out>/walkforward/selection.json` |
+| OOS 1회(`--oos-final PATH`) | `<out>/oos/<sha256 앞 12자>.json` + `.md`, 접근 로그 `--oos-log`(기본 `data/backtest/oos_access.jsonl`) 한 줄 |
 
 - 구간은 반열린 `[start, end)` UTC 자정 — `--end` 날짜는 포함하지 않는다(분석 CLI 의 종료일 포함과 다름).
   파일명의 두 번째 날짜도 반열린 end 다.
@@ -27,6 +29,11 @@
   `--start`/`--end` 와 함께 쓰면 거부(종료코드 2), `--fee-profile` 은 `default` 만(판정 default·민감도 bybit 를
   한 리포트에 담는다). 엔진이 끝까지 성공한 뒤에만 JSON → MD → selection.json 을 원자적으로 쓴다. 선택이 없으면
   selection.json 을 쓰지 않고 이전 실행의 낡은 파일을 지운다. 실패(종료코드 1)·거부(2)면 기존 산출물은 그대로.
+- `--oos-final PATH`: 선택 파일 검증·접근 로그 검사(`authorize_oos`, 쓰기 없음) → OOS [2022-01-01, 2025-01-01)
+  선택 run 1개(`default` 판정·`bybit` 병기) → `evaluate_oos`(접근 로그 append, 유일한 로그 쓰기) → JSON → MD.
+  선택·로그·그리드 문제는 데이터를 읽기 전에 종료코드 2, 로드·실행 실패는 1(로그 미기록). `--walkforward`·
+  `--start`/`--end` 와 함께 쓰면 2, `--fee-profile` 은 `default` 만. `--oos-log` 는 `--oos-final` 과만 쓴다.
+  로그를 지우거나 덮어쓰는 코드는 없다 — 가드 해제는 사람 판단. DSR(N=756)은 참고값이며 판정에 넣지 않는다.
 - 결정성: 실행 시각·소요 시간은 파일에 넣지 않는다. 같은 입력이면 JSON·MD 바이트가 같다.
 """
 
@@ -49,9 +56,9 @@ import pyarrow.parquet as pq
 
 from src.analysis.run import _cell, _span, _write_text_atomic, load_grid, to_jsonable
 from src.analysis.synthetic import RULESET_VERSION, Params, generate_run
-from src.backtest import costs
+from src.backtest import costs, walkforward
 from src.backtest.metrics import summarize_net_run
-from src.backtest.walkforward import (N_TRIALS, OOS_START, SAMPLE_START, WALKFORWARD_PARAM_ID,
+from src.backtest.walkforward import (N_TRIALS, OOS_END, OOS_LOG_PATH, OOS_START, SAMPLE_START, WALKFORWARD_PARAM_ID,
                                       WALKFORWARD_STRATEGY_ID, Fold, check_sample_range, deflated_sharpe,
                                       expected_max_sr, make_folds, make_selection, resolve_gate,
                                       select_params, sr_variance, stitch_test_roundtrips,
@@ -426,6 +433,144 @@ def write_walkforward_outputs(paths: Mapping[str, Path], report: dict) -> None:
         paths["selection"].unlink()
 
 
+# OOS 1회 --------------------------------------------------------------------------------------------
+
+def oos_paths(out_dir: Path, sha256: str) -> dict[str, Path]:
+    d = out_dir / "oos"
+    return {"json": d / f"{sha256[:12]}.json", "md": d / f"{sha256[:12]}.md"}
+
+
+def read_selection(path: Path) -> dict:
+    """선택 파일 JSON → dict. 읽기 실패는 `OSError`, JSON 오류·dict 아님은 `ValueError`."""
+    sel = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(sel, dict):
+        raise ValueError("선택 파일이 JSON 객체가 아니다")
+    return sel
+
+
+def walkforward_context(selection_path: Path, sha: str) -> dict:
+    """선택 파일 옆 워크포워드 리포트(`default.json`)에서 DSR 의 V 와 워크포워드 판정을 읽는다.
+
+    그 리포트의 `full_sample.selection.sha256` 이 `sha` 와 같을 때만 값을 쓴다. 없거나·읽을 수 없거나·sha256 이
+    다르면 V = NaN·판정 None(+ 경고). OOS DSR 은 참고값이라 실패 사유가 아니다.
+    """
+    path = Path(selection_path).parent / "default.json"
+    none = {"report": None, "var_sr": float("nan"), "verdict": None}
+    try:
+        rep = json.loads(path.read_text(encoding="utf-8"))
+        rep_sha = (rep.get("full_sample") or {}).get("selection", {}) or {}
+        if rep_sha.get("sha256") != sha:
+            log.warning("워크포워드 리포트 %s 의 선택 sha256 이 다르다 → DSR V 없음", path)
+            return none
+        v = rep["dsr"]["var_sr"]
+        return {"report": str(path), "var_sr": float("nan") if v is None else float(v),
+                "verdict": rep["verdict"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        log.warning("워크포워드 리포트 %s 를 쓸 수 없다(%s) → DSR V 없음", path, e)
+        return none
+
+
+def run_oos(selection: Mapping, params: Params, load_bars: Callable, log_path, wf_ctx: Mapping,
+            n_trials: int = N_TRIALS) -> dict:
+    """OOS [2022-01-01, 2025-01-01) 바 → 선택 run 1개 → `default`·`bybit` 비용 → 요약 → `evaluate_oos`(로그 append).
+
+    모든 계산이 끝난 뒤 마지막에 `evaluate_oos` 를 한 번 부른다 — 그 전 실패는 로그를 남기지 않는다.
+    판정 = `evaluate_oos` 반환(default 3기준), bybit 는 병기. DSR 은 참고값(판정 미반영).
+    """
+    g = selection["gate"]
+    bars = _load_range(load_bars, OOS_START, OOS_END)
+    res = generate_run(bars, params)
+    del bars
+    nets = {name: costs.apply_costs(res.roundtrips, name) for name in PROFILE_NAMES}
+    del res
+    bybit = _with_run_key(summarize_net_run(nets["bybit"], OOS_START, OOS_END, g),
+                          params.strategy_id, params.param_id)
+    v = float(wf_ctx["var_sr"])
+    default = walkforward.evaluate_oos(selection, nets["default"], log_path)  # 유일한 로그 쓰기
+    results = {"default": default, "bybit": bybit}
+    dsr = {"var_sr": v, "sr0": expected_max_sr(int(n_trials), v), "source": wf_ctx["report"]}
+    for name in PROFILE_NAMES:
+        r = results[name]
+        dsr[name] = deflated_sharpe(r["sr_daily"], n_trials, v, r["n_days"], r["skew_daily"], r["kurt_daily"])
+    wf_verdict = wf_ctx["verdict"]
+    return {
+        "selection": dict(selection), "oos": [_fmt_day(OOS_START), _fmt_day(OOS_END)], "gate": g,
+        "n_trials": int(n_trials), "results": results,
+        "verdict": default["gate"], "bybit_verdict": bybit["gate"], "dsr": dsr,
+        "walkforward_verdict": wf_verdict,
+        "phase4_eligible": None if wf_verdict is None else (wf_verdict == "pass" and default["gate"] == "pass"),
+    }
+
+
+def build_oos_report(engine_report: Mapping, symbol: str, axes: dict) -> dict:
+    """실행 시각은 넣지 않는다(결정적 — 시각은 접근 로그에만)."""
+    meta = {"symbol": symbol, "ruleset_version": RULESET_VERSION, "grid": axes,
+            "fee": {name: costs.PROFILES[name] for name in PROFILE_NAMES}, "judge_profile": "default"}
+    return to_jsonable({"meta": meta, **engine_report})
+
+
+PHASE4_TEXT = "Phase 4 진입 자격 = 워크포워드 pass 그리고 OOS pass, 착수·실거래 전환은 사람 판단"
+
+
+def render_oos_markdown(report: dict) -> str:
+    """OOS JSON 리포트 → 결과 표·OOS 판정·bybit 병기·DSR 참고값·Phase 4 자격(사람이 읽을 용도)."""
+    m, g, dsr, sel = report["meta"], report["gate"], report["dsr"], report["selection"]
+    o0, o1 = report["oos"]
+    lines = [
+        f"# OOS 1회 {m['symbol']} [{o0}, {o1}) · 판정 {m['judge_profile']}",
+        "",
+        f"- 선택: {sel['strategy_id']} / {sel['param_id']} · sha256 `{sel['sha256'][:12]}`"
+        f" · 선택 구간 [{sel['selected_on'][0]}, {sel['selected_on'][1]})",
+        f"- ruleset `{m['ruleset_version']}`",
+        f"- 게이트 기준(3기준): 거래 ≥ {g['min_trades']} · Sharpe ≥ {g['min_sharpe']} · MDD ≤ {g['max_drawdown']}",
+        "- 단위: mdd·net 비율(0.01 = 1%), sharpe 연환산(√365).",
+        "",
+        "## 결과",
+        "",
+        _row(WF_CURVE_COLUMNS),
+        "|" + "---|" * len(WF_CURVE_COLUMNS),
+    ]
+    for name in PROFILE_NAMES:
+        r = report["results"][name]
+        lines.append(_row([name] + [_cell(r.get(c)) for c in WF_CURVE_COLUMNS[1:]]))
+    if dsr["var_sr"] is None:
+        dsr_lines = ["- V 없음 — 같은 sha256 의 워크포워드 리포트(선택 파일 옆 `default.json`)를 찾지 못했다"]
+    else:
+        dsr_lines = [f"- V = {_cell(dsr['var_sr'])} (출처 `{dsr['source']}`) · SR0 = {_cell(dsr['sr0'])}",
+                     f"- DSR default = {_cell(dsr['default'])} · bybit = {_cell(dsr['bybit'])}"]
+    elig = report["phase4_eligible"]
+    elig_text = ("판단 불가 — 워크포워드 리포트 없음" if elig is None
+                 else f"{'충족' if elig else '미충족'} (워크포워드 {report['walkforward_verdict']}"
+                      f" · OOS {report['verdict']})")
+    lines += [
+        "",
+        "## OOS 판정",
+        "",
+        f"- **{report['verdict']}** (default: 3기준)",
+        "",
+        "## bybit 병기",
+        "",
+        f"- {report['bybit_verdict']} — 판정에 쓰지 않는다",
+        "",
+        f"## DSR 참고값 (N={report['n_trials']}, 판정 미반영)",
+        "",
+        *dsr_lines,
+        "",
+        "## Phase 4 진입 자격",
+        "",
+        f"- {PHASE4_TEXT}",
+        f"- 이번 결과: {elig_text}",
+        "",
+        "- ⚠ 펀딩·강제청산 미모델링. OOS 는 한 선택으로 한 번만 본다 — 접근 로그 가드 해제는 사람 판단.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def write_oos_outputs(paths: Mapping[str, Path], report: dict) -> None:
+    _write_text_atomic(_json_text(report), paths["json"])
+    _write_text_atomic(render_oos_markdown(report), paths["md"])
+
+
 def build_report(start: date, end: date, symbol: str, bars: pd.DataFrame, axes: dict, fee_profile: str,
                  gate: dict, summaries: list[dict]) -> dict:
     n = len(bars)
@@ -501,6 +646,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--walkforward", action="store_true",
                    help="기본 표본 고정 6폴드 워크포워드 → walkforward/default.json·md + selection.json"
                         " (--start/--end 불가, --fee-profile default 만)")
+    p.add_argument("--oos-final", type=Path, default=None, metavar="PATH",
+                   help="워크포워드 selection.json 으로 OOS [2022-01-01, 2025-01-01) 1회 실행 → oos/<sha256 앞 12자>.json·md"
+                        " (--walkforward·--start/--end 불가, --fee-profile default 만)")
+    p.add_argument("--oos-log", type=Path, default=None, metavar="PATH",
+                   help=f"OOS 접근 로그 경로 (기본 {OOS_LOG_PATH}, --oos-final 과만). 테스트·재현용 — "
+                        "로그 삭제·가드 해제는 사람")
     return p
 
 
@@ -508,7 +659,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = build_parser()
     a = parser.parse_args(argv)
-    if a.walkforward:
+    if a.oos_final is not None:
+        if a.walkforward:
+            parser.error("--oos-final 은 --walkforward 와 함께 쓸 수 없다")
+        if a.start is not None or a.end is not None:
+            parser.error("--oos-final 은 OOS [2022-01-01, 2025-01-01) 고정이라 --start/--end 를 받지 않는다")
+        if a.fee_profile != "default":
+            parser.error("--oos-final 은 --fee-profile default 만 받는다(bybit 는 리포트에 병기된다)")
+    elif a.oos_log is not None:
+        parser.error("--oos-log 는 --oos-final 과 함께만 쓴다")
+    elif a.walkforward:
         if a.start is not None or a.end is not None:
             parser.error("--walkforward 는 기본 표본 [2018-03-01, 2022-01-01) 고정 폴드라 --start/--end 를 받지 않는다")
         if a.fee_profile != "default":
@@ -524,6 +684,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         axes, params_list = load_grid(a.grid)
     except (OSError, ValueError) as e:  # json.JSONDecodeError 는 ValueError
         parser.error(f"--grid: {e}")
+    if a.oos_final is not None:
+        return _main_oos(parser, a, axes, params_list)
     if a.walkforward:
         return _main_walkforward(a, axes, params_list)
     gate = resolve_gate(None)
@@ -557,6 +719,40 @@ def _main_walkforward(a: argparse.Namespace, axes: dict, params_list: Sequence[P
         log.exception("워크포워드 실패")
         return 1
     log.info("완료 (%.1fs): %s 판정 %s", time.monotonic() - t0, paths["json"], report["verdict"])
+    return 0
+
+
+def _main_oos(parser: argparse.ArgumentParser, a: argparse.Namespace, axes: dict,
+              params_list: Sequence[Params]) -> int:
+    log_path = a.oos_log or OOS_LOG_PATH
+    try:
+        selection = read_selection(a.oos_final)
+        walkforward.authorize_oos(selection, log_path)  # 쓰기 없음(조기 거부용)
+    except (OSError, ValueError) as e:  # PermissionError(로그) ⊂ OSError, JSONDecodeError ⊂ ValueError
+        parser.error(f"--oos-final {a.oos_final}: {e}")
+    by_key = {(p.strategy_id, p.param_id): p for p in params_list}
+    params = by_key.get((selection["strategy_id"], selection["param_id"]))
+    if params is None:
+        parser.error(f"선택 run {selection['strategy_id']} / {selection['param_id']} 가 그리드에 없다 — "
+                     "--grid 를 선택을 만든 워크포워드 실행과 같게 줘라")
+    sha = selection["sha256"]
+    paths = oos_paths(a.out, sha)
+    wf_ctx = walkforward_context(a.oos_final, sha)
+    t0 = time.monotonic()
+    try:
+        engine = run_oos(selection, params, store_loader(a.symbol, a.data_dir), log_path, wf_ctx)
+    except PermissionError as e:  # 데이터를 읽는 사이 로그에 다른 sha256 이 생김 → 거부(로그 미기록)
+        parser.error(f"OOS 접근 로그 {log_path}: {e}")
+    except Exception:
+        log.exception("OOS 실행 실패(접근 로그 미기록)")
+        return 1
+    try:
+        report = build_oos_report(engine, a.symbol, axes)
+        write_oos_outputs(paths, report)
+    except Exception:
+        log.exception("OOS 리포트 쓰기 실패 — 접근 로그는 기록됨, 같은 선택으로 재실행하면 복구된다")
+        return 1
+    log.info("완료 (%.1fs): %s OOS 판정 %s", time.monotonic() - t0, paths["json"], report["verdict"])
     return 0
 
 
