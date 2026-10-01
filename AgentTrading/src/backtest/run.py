@@ -29,10 +29,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -44,7 +45,10 @@ from src.analysis.run import _cell, _span, _write_text_atomic, load_grid, to_jso
 from src.analysis.synthetic import RULESET_VERSION, Params, generate_run
 from src.backtest import costs
 from src.backtest.metrics import summarize_net_run
-from src.backtest.walkforward import check_sample_range, resolve_gate
+from src.backtest.walkforward import (N_TRIALS, OOS_START, SAMPLE_START, WALKFORWARD_PARAM_ID,
+                                      WALKFORWARD_STRATEGY_ID, Fold, check_sample_range, deflated_sharpe,
+                                      expected_max_sr, make_selection, resolve_gate, select_params,
+                                      sr_variance, stitch_test_roundtrips, walkforward_verdict)
 from src.ingest import normalize
 from src.ingest.store import load_bars
 from src.shared.schema import ROUNDTRIPS_NET, empty_frame, validate_roundtrips_net
@@ -155,6 +159,149 @@ def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], fee_profile: str
             log.info("run %d/%d (%.1fs)", i, len(ordered), time.monotonic() - t0)
     summaries.sort(key=lambda s: (s["strategy_id"], s["param_id"]))
     return summaries
+
+
+# 워크포워드 ------------------------------------------------------------------------------------------
+
+PROFILE_NAMES = ("default", "bybit")  # default = 판정, bybit = 민감도(설계 "워크포워드 검증 곡선과 판정")
+
+
+class _DiscardSink:
+    """net 프레임을 저장하지 않는 싱크(학습·표본 전체 그리드는 요약만 필요)."""
+
+    def write(self, sid: str, df: pd.DataFrame) -> None:
+        pass
+
+
+def _fmt_day(t: pd.Timestamp) -> str:
+    return t.strftime("%Y-%m-%d")
+
+
+def _load_range(load_bars: Callable, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """주입 로더로 `[start, end)` 바를 읽고, 구간 밖 `ts`(누수)·0행이면 `ValueError`."""
+    bars = load_bars(start, end)
+    if len(bars) == 0:
+        raise ValueError(f"[{_fmt_day(start)}, {_fmt_day(end)}) 바가 0행이다")
+    ts = bars["ts"]
+    if bool((ts < start).any()) or bool((ts >= end).any()):
+        raise ValueError(f"로더가 [{_fmt_day(start)}, {_fmt_day(end)}) 밖 바를 돌려줬다(학습·검증 누수 방지)")
+    return bars
+
+
+def _check_folds(folds: Sequence[Fold], sample: tuple[pd.Timestamp, pd.Timestamp]) -> None:
+    """각 구간 표본 가드 통과, 학습 end ≤ 검증 start, 검증 구간 오름차순·빈틈/겹침 없음, 모두 `sample` 안."""
+    if not folds:
+        raise ValueError("폴드가 없다")
+    s, e = sample
+    prev_end = None
+    for i, f in enumerate(folds, 1):
+        ts, te = check_sample_range(f.train_start, f.train_end)
+        vs, ve = check_sample_range(f.test_start, f.test_end)
+        if te > vs:
+            raise ValueError(f"폴드 {i}: 학습 구간이 검증 구간과 겹친다")
+        if ts < s or ve > e:
+            raise ValueError(f"폴드 {i}: 표본 [{_fmt_day(s)}, {_fmt_day(e)}) 밖 구간")
+        if prev_end is not None and vs != prev_end:
+            raise ValueError(f"폴드 {i}: 검증 구간이 앞 폴드에 이어지지 않는다(빈틈·겹침·역순)")
+        prev_end = ve
+
+
+def representative_var(summaries: Sequence[Mapping], params_list: Sequence[Params]) -> dict:
+    """DSR 의 V: `risk_pct == 1` 대표 run 요약의 `sr_daily` 표본 분산(ddof=1, NaN 제외).
+
+    그리드에 `risk_pct = 1` run 이 없거나 유한값이 2개 미만이면 `var_sr` = NaN → dsr NaN → 판정 미달.
+    """
+    keys = {(p.strategy_id, p.param_id) for p in params_list if p.risk_pct == 1.0}
+    rep = [s for s in summaries if (s["strategy_id"], s["param_id"]) in keys]
+    finite = sum(1 for s in rep if math.isfinite(float(s["sr_daily"])))
+    return {"var_sr": sr_variance(rep), "n_runs": len(rep), "n_finite": finite}
+
+
+def _with_run_key(summary: dict, sid, pid) -> dict:
+    summary["strategy_id"], summary["param_id"] = sid, pid  # 0건 run 은 metrics 가 None 으로 둔다
+    return summary
+
+
+def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Sequence[Params],
+                    gate: Mapping | None = None, sample=(SAMPLE_START, OOS_START),
+                    n_trials: int = N_TRIALS) -> dict:
+    """폴드별 학습 그리드(`default`) → `select_params` → 검증 실행(`default`·`bybit`) → 이어 붙인 곡선·DSR 리포트.
+
+    `load_bars(start, end)` 는 반열린 `[start, end)` UTC 자정 Timestamp 를 받아 1분봉을 돌려주는 주입 함수다.
+    학습 구간을 먼저 읽고 선택이 끝난 뒤에만 검증 구간을 읽는다. 선택 없음 폴드는 검증 바를 읽지 않고
+    거래 0·현금 보유로 요약한다. V 는 표본 전체 `risk_pct = 1` run 기준, `selection` 은 `sample` 이 기본 표본
+    전체일 때만 `make_selection` 결과(그 외 `None`). 반환 dict 의 NaN 은 float 그대로(JSON 변환은 호출자).
+    """
+    g = resolve_gate(gate)
+    s, e = check_sample_range(*sample)
+    _check_folds(folds, (s, e))
+    by_key = {(p.strategy_id, p.param_id): p for p in params_list}
+
+    fold_reports = []
+    test_nets: dict[str, list] = {name: [] for name in PROFILE_NAMES}
+    for i, f in enumerate(folds, 1):
+        bars = _load_range(load_bars, f.train_start, f.train_end)
+        train = run_grid(bars, params_list, "default", f.train_start, f.train_end, g, _DiscardSink())
+        del bars
+        sel = select_params(train, g)
+        test = {}
+        if sel is None:
+            log.info("폴드 %d: 선택 없음 → 현금 보유", i)
+            selection = None
+            empty = empty_frame(ROUNDTRIPS_NET)
+            for name in PROFILE_NAMES:
+                test[name] = summarize_net_run(empty, f.test_start, f.test_end, g)
+                test_nets[name].append(None)
+        else:
+            p = by_key[(sel["strategy_id"], sel["param_id"])]
+            selection = {"strategy_id": p.strategy_id, "param_id": p.param_id, "train_sharpe": sel["sharpe"],
+                         "train_n_trades": sel["n_trades"], "train_mdd": sel["mdd"]}
+            bars = _load_range(load_bars, f.test_start, f.test_end)
+            res = generate_run(bars, p)
+            del bars
+            for name in PROFILE_NAMES:
+                net = costs.apply_costs(res.roundtrips, name)
+                test[name] = _with_run_key(summarize_net_run(net, f.test_start, f.test_end, g),
+                                           p.strategy_id, p.param_id)
+                test_nets[name].append(net)
+            del res
+        fold_reports.append({
+            "train_start": _fmt_day(f.train_start), "train_end": _fmt_day(f.train_end),
+            "test_start": _fmt_day(f.test_start), "test_end": _fmt_day(f.test_end),
+            "selection": selection, "test": test,
+        })
+
+    eval_start, eval_end = folds[0].test_start, folds[-1].test_end
+    stitched = {}
+    for name in PROFILE_NAMES:
+        rt = stitch_test_roundtrips(test_nets[name])
+        stitched[name] = _with_run_key(summarize_net_run(rt, eval_start, eval_end, g),
+                                       WALKFORWARD_STRATEGY_ID, WALKFORWARD_PARAM_ID)
+    del test_nets
+
+    bars = _load_range(load_bars, s, e)
+    full = run_grid(bars, params_list, "default", s, e, g, _DiscardSink())
+    del bars
+    rv = representative_var(full, params_list)
+    full_sel = select_params(full, g)
+    selection_file = make_selection(full_sel, g) if full_sel is not None and (s, e) == (SAMPLE_START, OOS_START) \
+        else None
+
+    dsr = {"var_sr": rv["var_sr"], "n_var_runs": rv["n_runs"], "n_var_finite": rv["n_finite"],
+           "sr0": expected_max_sr(int(n_trials), rv["var_sr"])}
+    verdicts = {}
+    for name in PROFILE_NAMES:
+        st = stitched[name]
+        dsr[name] = deflated_sharpe(st["sr_daily"], n_trials, rv["var_sr"], st["n_days"], st["skew_daily"],
+                                    st["kurt_daily"])
+        verdicts[name] = walkforward_verdict(st, dsr[name], g)
+
+    return {
+        "gate": g, "n_trials": int(n_trials), "sample": [_fmt_day(s), _fmt_day(e)], "n_runs": len(params_list),
+        "folds": fold_reports, "stitched": stitched, "dsr": dsr,
+        "verdict": verdicts["default"], "bybit_verdict": verdicts["bybit"],
+        "full_sample": {"selected": full_sel, "selection": selection_file},
+    }
 
 
 def build_report(start: date, end: date, symbol: str, bars: pd.DataFrame, axes: dict, fee_profile: str,
