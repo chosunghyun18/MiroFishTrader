@@ -63,7 +63,7 @@ nohup autodev/autodev run -P AgentTrading > /tmp/autodev.out 2>&1 &
 | 태스크 큐 (계획·검토·구현 로그·완료 보고 포함) | 볼트 `Projects/work/<프로젝트>/task/autodev/T-*.md` |
 | 실행 요약 (날짜별) | 볼트 `Private/업무 자동화/runs/` |
 | 세션 핸드오프 기록 | 볼트 `Private/업무 자동화/handoff/<저장소>/`, 최신본은 `.claude/handoff/current.md` |
-| 코드 변경 | worktree `~/Desktop/work-autodev`, 브랜치 `autodev/<프로젝트>` |
+| 코드 변경 | 이 폴더(`~/Desktop/work`)의 현재 브랜치. 태스크당 1커밋으로 푸시 |
 | 단계별 원본 로그 | `autodev/logs/<날짜>/` (git 제외) |
 
 ## 태스크 직접 넣기
@@ -100,13 +100,13 @@ nohup autodev/autodev run -P AgentTrading > /tmp/autodev.out 2>&1 &
 | `AUTODEV_5H_LIMIT` | 90 | 5시간 창 사용률이 이 값 이상이면 리셋까지 대기 |
 | `AUTODEV_7D_LIMIT` | 85 | 주간 창 사용률이 이 값 이상이면 종료 |
 | `AUTODEV_PERMISSION_MODE` | auto | 헤드리스 권한 모드 |
-| `AUTODEV_WORKTREE` | `../work-autodev` | 자동 루프 전용 worktree 경로 |
 
 ## 안전장치
 
-- 코드는 전용 worktree 의 `autodev/<프로젝트>` 브랜치에서만 바뀐다. `main` 과 작업 중인 체크아웃은 건드리지 않는다.
+- 코드는 이 폴더의 현재 브랜치에서 바뀐다. 드라이버는 브랜치를 바꾸지 않는다.
+- 커밋에는 그 태스크가 만든 `<프로젝트>/` 안의 파일만 넣는다. 시작 전부터 있던 미커밋 파일과 다른 폴더의 변경은 건드리지 않는다.
 - 완료 판정은 모델의 자기 보고가 아니라 검증 명령의 종료코드로 한다.
-- 검증을 2회 연속 통과하지 못하면 그 태스크를 `blocked` 로 두고 다음 태스크로 넘어간다. 미완성 코드는 stash 에 보관한다.
+- 검증을 2회 연속 통과하지 못하면 그 태스크를 `blocked` 로 두고 다음 태스크로 넘어간다. 그 태스크가 만든 미완성 파일만 stash 에 보관한다.
 - 태스크 3개가 연속으로 중단되면 루프를 멈춘다.
 - 모델은 커밋·푸시·브랜치 전환을 직접 하지 못한다. 드라이버가 태스크당 1커밋으로 처리한다.
 - 볼트에 쓰려면 실행하는 터미널 앱에 전체 디스크 접근 권한이 있어야 한다. 없으면 시작할 때 바로 알려준다.

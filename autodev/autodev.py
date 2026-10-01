@@ -26,7 +26,7 @@ TOOL_DIR = Path(__file__).resolve().parent
 REPO = TOOL_DIR.parent
 VAULT = Path(os.environ.get("AUTODEV_VAULT", "/Users/jo/Documents/Obsidian Vault"))
 AUTO_VAULT = VAULT / "Private" / "업무 자동화"
-WORKTREE = Path(os.environ.get("AUTODEV_WORKTREE", str(REPO.parent / f"{REPO.name}-autodev")))
+WORKTREE = REPO   # 별도 worktree 없이 이 저장소(본 체크아웃)에서 직접 작업한다
 SNAPSHOT = Path.home() / ".claude" / "usage-snapshot.json"
 STOP_FILE = TOOL_DIR / "STOP"
 CLAUDE = os.environ.get("AUTODEV_CLAUDE", shutil.which("claude") or "claude")
@@ -208,7 +208,7 @@ class Project:
         self.setup: dict = c.get("setup", {})         # {"unless_exists": ".venv", "cmd": "..."}
         self.link: list[str] = c.get("link", [])      # 본 체크아웃에서 심링크할 비추적 파일
         self.notes: str = c.get("notes", "")
-        self.branch = f"autodev/{self.name}"
+
 
     @property
     def vault(self) -> Path:
@@ -217,6 +217,11 @@ class Project:
     @property
     def task_dir(self) -> Path:
         return self.vault / "task" / "autodev"
+
+    @property
+    def branch(self) -> str:
+        """현재 체크아웃된 브랜치 (드라이버는 브랜치를 바꾸지 않는다)."""
+        return git("branch", "--show-current").stdout.strip() or "HEAD"
 
     @property
     def code(self) -> Path:
@@ -526,54 +531,31 @@ class Run:
         return self.project.code if self.project.code.exists() else WORKTREE
 
 
-# ── git worktree ─────────────────────────────────────────────────────────────
+# ── 작업 공간 준비 (본 체크아웃 그대로 사용) ─────────────────────────────────
+def project_dirty(project: Project) -> str:
+    """이 프로젝트 폴더 안의 미커밋 변경만 본다 (다른 프로젝트·다른 세션의 변경은 무시)."""
+    return git("status", "--porcelain", "--", project.dir).stdout.strip()
+
+
 def ensure_worktree(project: Project) -> None:
-    base = git("rev-parse", "HEAD", cwd=REPO).stdout.strip()
-    has_branch = git("rev-parse", "--verify", "--quiet", f"refs/heads/{project.branch}", cwd=REPO).returncode == 0
-    if not (WORKTREE / ".git").exists():
-        args = ["worktree", "add", str(WORKTREE), project.branch] if has_branch else \
-               ["worktree", "add", "-b", project.branch, str(WORKTREE), base]
-        r = git(*args, cwd=REPO)
-        if r.returncode != 0:
-            sys.exit(f"worktree 생성 실패:\n{r.stderr}")
-        log(f"worktree 생성: {WORKTREE} ({project.branch})")
-    else:
-        if git("status", "--porcelain").stdout.strip():
-            git("stash", "push", "--include-untracked", "-m", f"autodev leftover {now():%Y-%m-%d %H:%M}")
-            log("⚠ worktree 에 남은 변경을 stash 로 보관했습니다 (git stash list)")
-        cur = git("branch", "--show-current").stdout.strip()
-        if cur != project.branch:
-            r = git("switch", project.branch) if has_branch else git("switch", "-c", project.branch, base)
-            if r.returncode != 0:
-                sys.exit(f"브랜치 전환 실패:\n{r.stderr}")
-    sync_base()
+    if git("rev-parse", "--is-inside-work-tree").returncode != 0:
+        sys.exit(f"git 저장소가 아닙니다: {REPO}")
+    if git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+        sys.exit("병합이 진행 중입니다. 병합을 끝낸 뒤 다시 실행하세요.")
     project.code.mkdir(parents=True, exist_ok=True)
-    for rel in project.link:
-        src, dst = REPO / project.dir / rel, project.code / rel
-        if src.exists() and not dst.exists() and not dst.is_symlink():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.symlink_to(src)
     marker = project.setup.get("unless_exists")
     if project.setup.get("cmd") and not (marker and (project.code / marker).exists()):
         log(f"환경 준비: {project.setup['cmd']}")
         r = sh(project.setup["cmd"], cwd=project.code, timeout=1800)
         if r.returncode != 0:
             log(f"⚠ 환경 준비 실패 (계속 진행):\n{(r.stdout + r.stderr)[-1500:]}")
+    if project_dirty(project):
+        log(f"⚠ {project.dir}/ 에 커밋 안 된 변경이 있습니다. 다른 세션의 작업일 수 있어 그대로 두고, 태스크 커밋에도 섞지 않습니다.")
 
 
 def sync_base() -> None:
-    """본 체크아웃의 최신 커밋을 worktree 브랜치에 병합한다 (충돌 시 병합을 취소하고 그대로 진행)."""
-    base = git("rev-parse", "HEAD", cwd=REPO).stdout.strip()
-    if not base or git("merge-base", "--is-ancestor", base, "HEAD").returncode == 0:
-        return
-    if git("status", "--porcelain").stdout.strip():
-        return                              # 작업 중인 변경이 있으면 건드리지 않는다
-    r = git("merge", "--no-edit", base)
-    if r.returncode != 0:
-        git("merge", "--abort")
-        log(f"⚠ 본 체크아웃({base[:7]}) 병합 충돌 — 병합 없이 진행합니다")
-    else:
-        log(f"본 체크아웃 {base[:7]} 병합 완료")
+    """(이전 worktree 방식의 잔재) 본 체크아웃에서 직접 작업하므로 할 일이 없다."""
+    return
 
 
 def preflight(project: Project) -> None:
@@ -657,15 +639,35 @@ def run_verify(project: Project, task: dict) -> tuple[bool, str]:
     return r.returncode == 0, f"$ {cmd}\n(exit {r.returncode})\n{tail}"
 
 
+def dirty_files(project: Project) -> dict[str, str]:
+    """프로젝트 폴더 안의 미커밋 파일 → 내용 해시."""
+    out = {}
+    for line in git("status", "--porcelain", "-uall", "--", project.dir).stdout.splitlines():
+        rel = line[3:].split(" -> ")[-1].strip().strip('"')
+        f = REPO / rel
+        out[rel] = git("hash-object", str(f)).stdout.strip() if f.is_file() else "-"
+    return out
+
+
+def task_changes(task: dict) -> list[str]:
+    """이 태스크가 만든 변경만 고른다: 시작 전부터 있던 미커밋 파일이 그대로면 제외."""
+    project = Project(task["project"]) if task.get("project") else None
+    if project is None:
+        return []
+    before = task.get("_preexisting") or {}
+    return [rel for rel, h in dirty_files(project).items() if before.get(rel) != h]
+
+
 def block(run: Run, task: dict, reason: str, human: str = "") -> dict:
     path = task["_path"]
     note = f"- {now():%Y-%m-%d %H:%M} **blocked** — {reason}"
     if human:
         note += f"\n  - 필요한 조치: {human}"
-    if git("status", "--porcelain").stdout.strip():
+    changed = task_changes(task)
+    if changed:
         name = f"autodev blocked {task['id']}"
-        git("stash", "push", "--include-untracked", "-m", name)
-        note += f"\n  - 미완성 코드는 worktree stash `{name}` 에 보관"
+        git("stash", "push", "--include-untracked", "-m", name, "--", *changed)
+        note += f"\n  - 미완성 코드는 git stash `{name}` 에 보관 (`git stash list`)"
     append_section(path, "사람이 할 일", note)
     update_task(path, status="blocked")
     log(f"  ✗ blocked: {reason[:200]}")
@@ -677,6 +679,7 @@ def run_task(run: Run, task: dict) -> dict:
     log(f"━━ {tid} · {task.get('title')}")
     v = {**common_vars(project), "task_file": path, "task_id": tid}
     update_task(path, status="in-progress", attempts=int(task.get("attempts", 0) or 0) + 1)
+    task["_preexisting"] = dirty_files(project)
 
     # 1) PLAN ↔ REVIEW (최대 MAX_PLAN_ROUNDS 회, 그 뒤에는 검토 의견을 안고 진행)
     feedback = "(없음 — 첫 계획)"
@@ -704,7 +707,7 @@ def run_task(run: Run, task: dict) -> dict:
                            f"- {now():%Y-%m-%d %H:%M} 검토 의견이 남았지만 자동 진행 (재계획 {MAX_PLAN_ROUNDS}회 소진). "
                            "남은 의견은 구현 단계에서 반영한다.")
     update_task(path, status="planned")
-    task = read_task(path)
+    task = {**read_task(path), "_preexisting": task.get("_preexisting", {})}
 
     # 2) BUILD → 기계 검증 (최대 MAX_BUILD_ATTEMPTS 회)
     failure = "(없음 — 첫 구현)"
@@ -727,16 +730,18 @@ def run_task(run: Run, task: dict) -> dict:
 
     # 3) commit / push (드라이버가 수행)
     commit = ""
-    git("add", "-A")
-    if git("diff", "--cached", "--quiet").returncode != 0:
+    changed = task_changes(task)
+    if changed:
+        git("add", "-A", "--", *changed)
+    if changed and git("diff", "--cached", "--quiet", "--", *changed).returncode != 0:
         subject = (build.get("commit_message") or f"feat: {task.get('title')}").strip().splitlines()[0][:100]
-        msg = f"{subject}\n\nAutodev-Task: {tid}\nCo-Authored-By: Claude <noreply@anthropic.com>"
-        r = git("commit", "-q", "-m", msg)
+        msg = f"{subject}\n\nAutodev-Task: {tid}\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+        r = git("commit", "-q", "-m", msg, "--", *changed)
         if r.returncode != 0:
             return block(run, task, f"커밋 실패: {r.stderr[-300:]}")
         commit = git("rev-parse", "--short", "HEAD").stdout.strip()
         if run.push:
-            r = git("push", "-u", "origin", project.branch, timeout=300)
+            r = git("push", "-u", "origin", "HEAD", timeout=300)
             if r.returncode != 0:
                 log(f"  ⚠ push 실패 (다음 태스크에서 다시 시도): {r.stderr.strip()[-200:]}")
     update_task(path, status="done", commit=commit or "(코드 변경 없음)", completed=f"{now():%Y-%m-%d %H:%M}")
@@ -757,7 +762,7 @@ def write_summary(run: Run) -> Path:
     left = [t for t in tasks if t.get("status") in ("todo", "planned", "in-progress")]
     lines = [f"## {run.started:%H:%M}–{now():%H:%M} · {project.name}", "",
              f"- 종료 사유: {run.stop_reason or '큐 소진'}",
-             f"- 브랜치: `{project.branch}` (worktree `{WORKTREE}`)",
+             f"- 브랜치: `{project.branch}` (`{REPO}`)",
              f"- 사용량 시작: {run.quota_start}",
              f"- 사용량 종료: {fmt_quota(load_snapshot())}",
              f"- 완료 {len(done)} · 중단 {len(blocked)} · 남은 큐 {len(left)}", ""]
