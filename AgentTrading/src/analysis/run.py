@@ -16,8 +16,12 @@
 
 - 표본 구간은 2018-03-01~2021-12-31. 밖(특히 OOS 2022-01-01 이후)은 데이터를 읽기 전에 거부(종료코드 2).
 - `--grid` 는 축 → 값 목록 JSON(설계 그리드 부분집합만, 생략 축은 설계 값 전체). 위반은 종료코드 2.
-- 결측 일·하드 가드 등 실행 중 예외는 로그 후 종료코드 1. 모든 run 을 메모리에서 끝낸 뒤 마지막에
-  원자적으로 쓰므로 실패 시 산출물이 남지 않는다.
+- 결측 일·하드 가드 등 실행 중 예외는 로그 후 종료코드 1. 라운드트립은 run 을 (strategy_id, param_id) 순서로
+  실행하며 run 단위로 트리거별 `<parquet>.tmp` 에 이어 쓰고(`src.shared.sink.RoundtripSink`, 메모리 상한 = 행 그룹
+  버퍼 + run 1개 — run 수·구간 길이와 무관), 전체 성공 후에야 rename → JSON·MD 를 원자적으로 쓴다. 실패하면 이번
+  실행의 `.tmp` 를 지우므로 기존 산출물은 그대로다(rename 뒤 JSON·MD 쓰기 실패는 파일별 원자성만 보장).
+- 0행 트리거는 빈 행 그룹 1개를 쓴다. 트리거당 행 수가 `ROW_GROUP_ROWS` 미만이면 parquet 바이트가 스트리밍 도입 전
+  (`DataFrame.to_parquet` 1회)과 같고, 그 이상이면 행 그룹 배치만 달라진다(읽은 내용은 같다).
 - 결정성: 실행 시각·소요 시간은 파일에 넣지 않고 로그로만 낸다. 같은 입력이면 JSON·MD 바이트가 같다.
 - 모든 손익 지표는 gross(비용 전)다.
 """
@@ -42,7 +46,8 @@ from src.analysis.patterns import summarize_run
 from src.analysis.synthetic import GRID, RULESET_VERSION, Params, generate_run
 from src.ingest import normalize
 from src.ingest.store import load_bars
-from src.shared.schema import ROUNDTRIPS, empty_frame, validate_roundtrips
+from src.shared.schema import ROUNDTRIPS, validate_roundtrips
+from src.shared.sink import ROW_GROUP_ROWS, RoundtripSink
 
 log = logging.getLogger(__name__)
 
@@ -126,38 +131,34 @@ def load_grid(path: Path | None) -> tuple[dict, list[Params]]:
     return expand_grid(spec)
 
 
-def run_grid(bars: pd.DataFrame, params_list: Sequence[Params]
-             ) -> tuple[dict[str, pd.DataFrame], list[dict]]:
-    """run 별 생성·요약 → ({strategy_id: 라운드트립}, (strategy_id, param_id) 정렬 요약 목록).
+def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], sink) -> list[dict]:
+    """run 을 (strategy_id, param_id) 순서로 생성·요약 → `sink.write(strategy_id, 라운드트립)` → 정렬 요약 목록.
 
-    실행한 트리거는 거래 0건이어도 0행 라운드트립 프레임을 가진다. 요약에는 `halted` 를 덧붙인다.
+    `generate_run` 의 trade_id 가 run 안에서 0..n-1 이므로 이 실행 순서가 곧 `RT_SORT_KEY` 정렬 순서다.
+    거래 0건 run 도 `write` 를 부르므로 실행한 트리거는 0행이라도 파일을 가진다. 라운드트립은 run 이 끝나면 버린다.
+    요약에는 `halted` 를 덧붙인다.
     """
-    frames: dict[str, list[pd.DataFrame]] = {}
+    ordered = sorted(params_list, key=lambda p: (p.strategy_id, p.param_id))
     summaries = []
     t0 = time.monotonic()
-    for i, p in enumerate(params_list, 1):
+    for i, p in enumerate(ordered, 1):
         res = generate_run(bars, p)
         summary = summarize_run(res.roundtrips, skipped_min_qty=res.skipped_min_qty)
         summary["strategy_id"] = p.strategy_id  # 0건 run 은 patterns 가 None 으로 둔다
         summary["param_id"] = p.param_id
         summary["halted"] = bool(res.halted)
         summaries.append(summary)
-        parts = frames.setdefault(p.strategy_id, [])
-        if len(res.roundtrips):
-            parts.append(res.roundtrips)
-        if i % PROGRESS_EVERY == 0 or i == len(params_list):
-            log.info("run %d/%d (%.1fs)", i, len(params_list), time.monotonic() - t0)
+        sink.write(p.strategy_id, res.roundtrips)
+        if i % PROGRESS_EVERY == 0 or i == len(ordered):
+            log.info("run %d/%d (%.1fs)", i, len(ordered), time.monotonic() - t0)
+    return summaries
 
-    roundtrips = {}
-    for sid, parts in frames.items():
-        if parts:
-            df = pd.concat(parts, ignore_index=True)
-            df = df.sort_values(RT_SORT_KEY, kind="stable", ignore_index=True)
-        else:
-            df = empty_frame(ROUNDTRIPS)
-        roundtrips[sid] = validate_roundtrips(df)
-    summaries.sort(key=lambda s: (s["strategy_id"], s["param_id"]))
-    return roundtrips, summaries
+
+def open_sink(paths: dict[str, Path], row_group_rows: int | None = None) -> RoundtripSink:
+    """분석 라운드트립 싱크(`validate_roundtrips` 검증, 0행 트리거는 빈 행 그룹 1개)."""
+    return RoundtripSink(paths, ROUNDTRIPS, validate_roundtrips,
+                         row_group_rows=ROW_GROUP_ROWS if row_group_rows is None else row_group_rows,
+                         write_empty_row_group=True)
 
 
 def to_jsonable(obj):
@@ -240,16 +241,11 @@ def _write_text_atomic(text: str, path: Path) -> None:
     normalize._replace_atomic(lambda tmp: tmp.write_text(text, encoding="utf-8"), path)
 
 
-def write_outputs(out_dir: Path, start: date, end: date, roundtrips: dict[str, pd.DataFrame],
-                  report: dict) -> dict[str, Path]:
-    """라운드트립 parquet(트리거별)·JSON·MD 를 원자적으로 쓴다. 쓴 경로를 돌려준다."""
-    paths = output_paths(Path(out_dir), start, end, sorted(roundtrips))
-    for sid, df in sorted(roundtrips.items()):
-        normalize.write_parquet_atomic(df, paths[sid])
+def write_outputs(paths: dict[str, Path], report: dict) -> None:
+    """분포 JSON·MD 를 원자적으로 쓴다(라운드트립 parquet 는 `RoundtripSink` 가 쓴다)."""
     text = json.dumps(report, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
     _write_text_atomic(text, paths["json"])
     _write_text_atomic(render_markdown(report), paths["md"])
-    return paths
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -284,9 +280,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         bars = load_bars(a.start, a.end, a.symbol, out_dir=a.data_dir)
         log.info("1분봉 %d개 로드, run %d개 실행", len(bars), len(params_list))
-        roundtrips, summaries = run_grid(bars, params_list)
-        report = build_report(a.start, a.end, a.symbol, bars, axes, summaries)
-        paths = write_outputs(a.out, a.start, a.end, roundtrips, report)
+        paths = output_paths(a.out, a.start, a.end, sorted({p.strategy_id for p in params_list}))
+        with open_sink(paths) as sink:
+            summaries = run_grid(bars, params_list, sink)
+            report = build_report(a.start, a.end, a.symbol, bars, axes, summaries)
+            sink.commit()
+        write_outputs(paths, report)
     except Exception:
         log.exception("분석 실패")
         return 1

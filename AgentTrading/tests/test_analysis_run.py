@@ -1,5 +1,6 @@
 """analysis.run — tmp 합성 parquet 로 CLI 끝까지, 결정성, 결측 일, OOS 거부, 그리드 검증."""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pandas.testing as pdt
+import pyarrow.parquet as pq
 import pytest
 
 from src.analysis import run as ar
@@ -179,13 +181,25 @@ def test_expand_grid_defaults_and_normalization():
     assert all(p.k is None for p in params)  # h1 은 k 축을 무시
 
 
+class ListSink:
+    """write 호출만 (sid, 행 수) 로 기록하는 싱크 — 프레임을 붙잡지 않는다."""
+
+    def __init__(self):
+        self.calls = []
+
+    def write(self, sid, df):
+        self.calls.append((sid, len(df)))
+
+
 def test_zero_trade_runs_keep_ids_and_files(tmp_path, grid_file):
     norm = tmp_path / "norm"
     write_days(norm, flat=True)
     bars = load_bars(D1, D2, SYM, out_dir=norm)
     _, params = ar.load_grid(grid_file)
-    rts, summaries = ar.run_grid(bars, params)
-    assert sorted(rts) == ["syn-v1-h1", "syn-v1-h2"] and all(len(df) == 0 for df in rts.values())
+    sink = ListSink()
+    summaries = ar.run_grid(bars, params, sink)
+    rts = sorted({sid for sid, _ in sink.calls})
+    assert rts == ["syn-v1-h1", "syn-v1-h2"] and all(n == 0 for _, n in sink.calls)
     assert [(s["strategy_id"], s["param_id"]) for s in summaries] == \
         [(p.strategy_id, p.param_id) for p in params]
     assert all(s["n_trades"] == 0 and s["halted"] is False for s in summaries)
@@ -210,3 +224,149 @@ def test_module_entrypoint_help():
     r = subprocess.run([sys.executable, "-m", "src.analysis.run", "--help"], cwd=ROOT,
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and "--grid" in r.stdout
+
+
+# 골든: 스트리밍 쓰기(T-20261002-37) 이전 HEAD(ba5eab9)의 `main` 산출물 sha256. 산출물 형식·내용 불변의 증거다.
+# pyarrow 25.0.1·pandas 2.3.3 에 묶인다(parquet created_by·pandas 메타데이터). 버전을 올려 깨지면 내용 동일을
+# 먼저 확인(test_run_grid_sorted_and_validated 등)한 뒤, 이 테스트의 actual dict 를 출력해 상수를 다시 고정한다.
+GOLDEN_GRID = {"trigger": ["h1", "h2", "h3"], "n": [15], "k": [2], "stop_pct": [0.5, 1], "tp_r": [2],
+               "max_hold": [60], "risk_pct": [1]}
+GOLDEN_SHA256 = {
+    False: {
+        "distributions/20200312_20200313.json": "40d153453c96e313c7a72cfc16af95fb55fb50fc49ca572b3ecba8ce37414c24",
+        "distributions/20200312_20200313.md": "c9d9105effb9810851455ba1e534b86fdebb900785aa95eea5fdeac300343e78",
+        "roundtrips/syn-v1-h1/20200312_20200313.parquet":
+            "dc224cb44cc5eed6748f382e681815e5a7498f28c7ac67bccb15c7035889e97f",
+        "roundtrips/syn-v1-h2/20200312_20200313.parquet":
+            "4e683dcd9403097624944de44023c2b4fb1dfa10590d6b7ffd31486d3ec54cf6",
+        "roundtrips/syn-v1-h3/20200312_20200313.parquet":
+            "77615ffb06058a2a1920eaf256b25cccbecb18c63768439d4f2d85ccda57d2ae",
+    },
+    True: {  # flat: 모든 run 0건 → 트리거마다 0행 parquet(빈 행 그룹 1개)
+        "distributions/20200312_20200313.json": "7baa3ef54bc6cc7dae53a173cc00c21eb90dd80b6798cd1bc742584a3f51d146",
+        "distributions/20200312_20200313.md": "770cae898690a01a78f315fc7c28b55523776c70b43eaf23e76ed88cce3f269f",
+        "roundtrips/syn-v1-h1/20200312_20200313.parquet":
+            "79d0bea7f1d0d7c8fd61c848462f1b7c6fb5b46803dc80c5dc2edd0b2efb4028",
+        "roundtrips/syn-v1-h2/20200312_20200313.parquet":
+            "79d0bea7f1d0d7c8fd61c848462f1b7c6fb5b46803dc80c5dc2edd0b2efb4028",
+        "roundtrips/syn-v1-h3/20200312_20200313.parquet":
+            "79d0bea7f1d0d7c8fd61c848462f1b7c6fb5b46803dc80c5dc2edd0b2efb4028",
+    },
+}
+
+
+@pytest.mark.parametrize("flat", [False, True])
+def test_outputs_bytes_golden(tmp_path, flat):
+    norm, out, g = tmp_path / "norm", tmp_path / "out", tmp_path / "g.json"
+    write_days(norm, flat=flat)
+    g.write_text(json.dumps(GOLDEN_GRID))
+    assert ar.main(_argv(norm, out, g)) == 0
+    actual = {p.relative_to(out).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in sorted(out.rglob("*")) if p.is_file()}
+    assert actual == GOLDEN_SHA256[flat]
+    if not flat:  # 트리거마다 거래 있는 run 2개가 한 parquet 에 이어 붙는 경우를 덮는다
+        for sid in ("syn-v1-h1", "syn-v1-h2", "syn-v1-h3"):
+            rt = pd.read_parquet(out / "roundtrips" / sid / f"{SPAN}.parquet")
+            sizes = rt.groupby("param_id").size()
+            assert len(sizes) == 2 and (sizes > 0).all()
+
+
+GRID6 = {"trigger": ["h1", "h2", "h3"], "n": [15], "k": [2], "stop_pct": [0.5, 1], "tp_r": [2],
+         "max_hold": [60], "risk_pct": [1]}
+
+
+def _sink_paths(out, params):
+    return ar.output_paths(out, D1, D2, sorted({p.strategy_id for p in params}))
+
+
+def test_run_grid_sorted_and_validated(norm, tmp_path):
+    """섞은 순서로 넘겨도 (strategy_id, param_id) 순서로 실행 → 기존 concat + RT_SORT_KEY 정렬과 같은 parquet."""
+    bars = load_bars(D1, D2, SYM, out_dir=norm)
+    _, params = ar.expand_grid(GRID6)
+    shuffled = [params[i] for i in np.random.default_rng(3).permutation(len(params))]
+    assert shuffled != params
+    paths = _sink_paths(tmp_path / "out", params)
+    with ar.open_sink(paths) as sink:
+        summaries = ar.run_grid(bars, shuffled, sink)
+        sink.commit()
+    assert [(s["strategy_id"], s["param_id"]) for s in summaries] == \
+        sorted((p.strategy_id, p.param_id) for p in params)
+    for sid in ("syn-v1-h1", "syn-v1-h2", "syn-v1-h3"):
+        parts = [generate_run(bars, p).roundtrips for p in shuffled if p.strategy_id == sid]
+        want = pd.concat(parts, ignore_index=True).sort_values(ar.RT_SORT_KEY, kind="stable", ignore_index=True)
+        got = validate_roundtrips(pd.read_parquet(paths[sid]))
+        pdt.assert_frame_equal(got, validate_roundtrips(want))
+        assert got["param_id"].nunique() == 2
+
+
+def test_run_grid_writes_once_per_run_without_accumulating(norm, tmp_path):
+    bars = load_bars(D1, D2, SYM, out_dir=norm)
+    _, params = ar.expand_grid(GRID6)
+    sink = ListSink()
+    got = ar.run_grid(bars, params, sink)
+    assert isinstance(got, list) and all(isinstance(s, dict) for s in got)  # 요약만 돌려준다
+    assert [sid for sid, _ in sink.calls] == [p.strategy_id for p in params]  # run 마다 정확히 1회
+    assert [n for _, n in sink.calls] == [s["n_trades"] for s in got]
+
+    write_days(tmp_path / "flat", flat=True)  # 0건 run 도 write 를 부른다
+    flat = ListSink()
+    ar.run_grid(load_bars(D1, D2, SYM, out_dir=tmp_path / "flat"), params, flat)
+    assert len(flat.calls) == len(params) and all(n == 0 for _, n in flat.calls)
+
+
+def test_sink_row_group_flush_same_content(norm, tmp_path):
+    bars = load_bars(D1, D2, SYM, out_dir=norm)
+    _, params = ar.expand_grid(GRID6)
+    outs = {}
+    for rg in (ar.ROW_GROUP_ROWS, 1):
+        paths = _sink_paths(tmp_path / f"rg{rg}", params)
+        with ar.open_sink(paths, row_group_rows=rg) as sink:
+            ar.run_grid(bars, params, sink)
+            sink.commit()
+        outs[rg] = paths
+    for sid in ("syn-v1-h1", "syn-v1-h2", "syn-v1-h3"):
+        assert pq.ParquetFile(outs[1][sid]).num_row_groups > 1
+        assert pq.ParquetFile(outs[ar.ROW_GROUP_ROWS][sid]).num_row_groups == 1
+        pdt.assert_frame_equal(pd.read_parquet(outs[1][sid]), pd.read_parquet(outs[ar.ROW_GROUP_ROWS][sid]))
+
+
+def _fail_on_second_trigger(monkeypatch):
+    real = ar.summarize_run
+    seen = []
+
+    def boom(rt, skipped_min_qty):
+        if len(rt) and rt["strategy_id"].iat[0] == "syn-v1-h2":
+            seen.append(1)
+            raise RuntimeError("주입 예외")
+        return real(rt, skipped_min_qty=skipped_min_qty)
+
+    monkeypatch.setattr(ar, "summarize_run", boom)
+    return seen
+
+
+def _all_files(root):
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_failure_mid_run_leaves_nothing(norm, tmp_path, monkeypatch):
+    g = tmp_path / "g.json"
+    g.write_text(json.dumps(GRID6))
+    seen = _fail_on_second_trigger(monkeypatch)
+    out = tmp_path / "out"
+    assert ar.main(_argv(norm, out, g)) == 1
+    assert seen  # h1 은 이미 .tmp 에 쓴 뒤 h2 에서 실패
+    assert not list(out.rglob("*.parquet")) and not list(out.rglob("*.tmp"))
+    assert not (out / "distributions").exists() or not list((out / "distributions").iterdir())
+
+
+def test_failure_rerun_keeps_previous_outputs(norm, tmp_path, monkeypatch):
+    g = tmp_path / "g.json"
+    g.write_text(json.dumps(GRID6))
+    out = tmp_path / "out"
+    assert ar.main(_argv(norm, out, g)) == 0
+    before = _all_files(out)
+    assert len(before) == 5
+    _fail_on_second_trigger(monkeypatch)
+    assert ar.main(_argv(norm, out, g)) == 1
+    assert _all_files(out) == before
+    assert not list(out.rglob("*.tmp"))

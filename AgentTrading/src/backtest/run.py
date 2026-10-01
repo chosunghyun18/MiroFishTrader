@@ -24,7 +24,7 @@
   파일명의 두 번째 날짜도 반열린 end 다.
 - 기본 표본 [2018-03-01, 2022-01-01) 밖·OOS·2025 이후·`start ≥ end` 는 데이터를 읽기 전에 거부(종료코드 2).
 - 결측 일 등 실행 중 예외는 로그 후 종료코드 1. net 라운드트립은 run 단위로 트리거별 `<parquet>.tmp` 에 이어 쓰고
-  (`RoundtripSink`, 메모리 상한 = 행 그룹 버퍼 + run 1개), 전체 성공 후에야 rename → JSON·MD 를 쓴다.
+  (`RoundtripSink` ← `src/shared/sink.py`, 메모리 상한 = 행 그룹 버퍼 + run 1개), 전체 성공 후에야 rename → JSON·MD 를 쓴다.
   실패하면 이번 실행의 `.tmp` 를 지우므로 최종 산출물이 없다.
 - 게이트 기준은 코드 기본값(`walkforward.resolve_gate(None)`, Spec 3절)을 meta 에 기록한다. 여기서의 판정은
   단일 구간 3기준이며 최종 판정이 아니다(워크포워드·DSR 은 `--walkforward`).
@@ -57,7 +57,6 @@ import json
 import logging
 import math
 import multiprocessing
-import os
 import sys
 import time
 from collections import deque
@@ -67,8 +66,6 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from src.analysis.run import _cell, _span, _write_text_atomic, load_grid, to_jsonable
 from src.analysis.synthetic import RULESET_VERSION, Params, generate_run
@@ -81,6 +78,7 @@ from src.backtest.walkforward import (N_TRIALS, OOS_END, OOS_LOG_PATH, OOS_START
                                       walkforward_verdict)
 from src.ingest import bitmex_funding, normalize
 from src.ingest.store import load_bars
+from src.shared import sink as shared_sink
 from src.shared.schema import (ROUNDTRIPS_NET, ROUNDTRIPS_NET_FUNDING, TableSchema, empty_frame,
                                validate_roundtrips_net, validate_roundtrips_net_funding)
 
@@ -97,78 +95,15 @@ FUNDING_SUFFIX = "+funding"
 FUNDING_GAP_SHOW = 5  # 결측 오류 메시지에 보일 시각 수
 
 
-class RoundtripSink:
-    """트리거별 net 라운드트립을 run 단위로 `<parquet>.tmp` 에 이어 쓰고, `commit()` 에서 일괄 rename.
+class RoundtripSink(shared_sink.RoundtripSink):
+    """net 라운드트립용 `src.shared.sink.RoundtripSink`(0행 트리거는 행 그룹 0개).
 
-    `write(sid, df)` 는 `(strategy_id, param_id, trade_id)` 정렬 순서로 불려야 한다(같은 sid 는 연속).
-    동시에 열린 writer 는 1개, 버퍼는 `ROW_GROUP_ROWS` 행. 0행 df 만 받은 트리거는 0행 parquet 가 된다.
-    with 블록에서 예외가 나거나 commit 전에 빠져나오면 `abort()` 가 이번 실행의 `.tmp` 를 모두 지운다.
+    검증 함수는 schema(net/net_funding)로 고르고, 행 그룹 크기는 생성 시점의 모듈 `ROW_GROUP_ROWS` 를 쓴다.
     """
 
     def __init__(self, paths: Mapping[str, Path], schema: TableSchema = ROUNDTRIPS_NET):
-        self.paths = dict(paths)
-        self.schema = pa.Schema.from_pandas(empty_frame(schema), preserve_index=False)
-        self._validate = validate_roundtrips_net_funding if schema is ROUNDTRIPS_NET_FUNDING \
-            else validate_roundtrips_net
-        self._tmps: dict[str, Path] = {}
-        self._sid: str | None = None
-        self._writer: pq.ParquetWriter | None = None
-        self._buf: list[pa.Table] = []
-        self._buf_rows = 0
-        self._committed = False
-
-    def write(self, sid: str, df: pd.DataFrame) -> None:
-        if sid != self._sid:
-            if sid in self._tmps:
-                raise ValueError(f"strategy_id {sid!r} 가 연속되지 않는다(정렬 순서로 써야 한다)")
-            self._close()
-            tmp = self.paths[sid].with_name(self.paths[sid].name + ".tmp")
-            tmp.parent.mkdir(parents=True, exist_ok=True)
-            self._tmps[sid] = tmp
-            self._writer = pq.ParquetWriter(tmp, self.schema, compression="snappy")
-            self._sid = sid
-        if len(df):
-            self._validate(df)
-            self._buf.append(pa.Table.from_pandas(df, schema=self.schema, preserve_index=False))
-            self._buf_rows += len(df)
-            if self._buf_rows >= ROW_GROUP_ROWS:
-                self._flush()
-
-    def _flush(self) -> None:
-        if self._buf:
-            self._writer.write_table(pa.concat_tables(self._buf))
-            self._buf, self._buf_rows = [], 0
-
-    def _close(self) -> None:
-        if self._writer is not None:
-            try:
-                self._flush()
-            finally:
-                self._writer.close()
-                self._writer, self._sid = None, None
-
-    def commit(self) -> None:
-        self._close()
-        for sid, tmp in self._tmps.items():
-            os.replace(tmp, self.paths[sid])
-        self._committed = True
-
-    def abort(self) -> None:
-        self._buf, self._buf_rows = [], 0
-        try:
-            if self._writer is not None:
-                self._writer.close()
-        finally:
-            self._writer, self._sid = None, None
-            for tmp in self._tmps.values():
-                tmp.unlink(missing_ok=True)
-
-    def __enter__(self) -> RoundtripSink:
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if exc_type is not None or not self._committed:
-            self.abort()
+        validate = validate_roundtrips_net_funding if schema is ROUNDTRIPS_NET_FUNDING else validate_roundtrips_net
+        super().__init__(paths, schema, validate, row_group_rows=ROW_GROUP_ROWS)
 
 
 def _project_net(net: pd.DataFrame) -> pd.DataFrame:
