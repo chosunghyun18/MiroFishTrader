@@ -16,7 +16,9 @@
 - 구간은 반열린 `[start, end)` UTC 자정 — `--end` 날짜는 포함하지 않는다(분석 CLI 의 종료일 포함과 다름).
   파일명의 두 번째 날짜도 반열린 end 다.
 - 기본 표본 [2018-03-01, 2022-01-01) 밖·OOS·2025 이후·`start ≥ end` 는 데이터를 읽기 전에 거부(종료코드 2).
-- 결측 일 등 실행 중 예외는 로그 후 종료코드 1. 모든 run 을 메모리에서 끝낸 뒤 원자적으로 쓰므로 실패 시 산출물이 없다.
+- 결측 일 등 실행 중 예외는 로그 후 종료코드 1. net 라운드트립은 run 단위로 트리거별 `<parquet>.tmp` 에 이어 쓰고
+  (`RoundtripSink`, 메모리 상한 = 행 그룹 버퍼 + run 1개), 전체 성공 후에야 rename → JSON·MD 를 쓴다.
+  실패하면 이번 실행의 `.tmp` 를 지우므로 최종 산출물이 없다.
 - 게이트 기준은 코드 기본값(`walkforward.resolve_gate(None)`, Spec 3절)을 meta 에 기록한다. 여기서의 판정은
   단일 구간 3기준이며 최종 판정이 아니다(워크포워드·DSR 은 `--walkforward`, 후속 태스크).
 - 결정성: 실행 시각·소요 시간은 파일에 넣지 않는다. 같은 입력이면 JSON·MD 바이트가 같다.
@@ -27,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -34,6 +37,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from src.analysis.run import _cell, _span, _write_text_atomic, load_grid, to_jsonable
 from src.analysis.synthetic import RULESET_VERSION, Params, generate_run
@@ -48,44 +53,108 @@ log = logging.getLogger(__name__)
 
 DEFAULT_OUT_DIR = Path("data/out/backtest")
 PROGRESS_EVERY = 100
+ROW_GROUP_ROWS = 100_000  # 트리거별 버퍼가 이 행 수에 닿으면 행 그룹 하나로 flush
 RT_SORT_KEY = ["strategy_id", "param_id", "trade_id"]
 MD_COLUMNS = ("strategy_id", "param_id", "n_trades", "sharpe", "mdd", "total_net_ret", "total_gross_ret",
               "n_liq_breach", "gate")
 
 
-def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], fee_profile: str | Mapping,
-             start: date, end: date, gate: Mapping | None = None
-             ) -> tuple[dict[str, pd.DataFrame], list[dict]]:
-    """run 별 생성 → 비용 → 요약 → ({strategy_id: net 라운드트립}, (strategy_id, param_id) 정렬 요약 목록).
+class RoundtripSink:
+    """트리거별 net 라운드트립을 run 단위로 `<parquet>.tmp` 에 이어 쓰고, `commit()` 에서 일괄 rename.
 
-    `[start, end)` 반열린 구간. 실행한 트리거는 거래 0건이어도 0행 `ROUNDTRIPS_NET` 프레임을 가진다.
+    `write(sid, df)` 는 `(strategy_id, param_id, trade_id)` 정렬 순서로 불려야 한다(같은 sid 는 연속).
+    동시에 열린 writer 는 1개, 버퍼는 `ROW_GROUP_ROWS` 행. 0행 df 만 받은 트리거는 0행 parquet 가 된다.
+    with 블록에서 예외가 나거나 commit 전에 빠져나오면 `abort()` 가 이번 실행의 `.tmp` 를 모두 지운다.
     """
-    frames: dict[str, list[pd.DataFrame]] = {}
+
+    def __init__(self, paths: Mapping[str, Path]):
+        self.paths = dict(paths)
+        self.schema = pa.Schema.from_pandas(empty_frame(ROUNDTRIPS_NET), preserve_index=False)
+        self._tmps: dict[str, Path] = {}
+        self._sid: str | None = None
+        self._writer: pq.ParquetWriter | None = None
+        self._buf: list[pa.Table] = []
+        self._buf_rows = 0
+        self._committed = False
+
+    def write(self, sid: str, df: pd.DataFrame) -> None:
+        if sid != self._sid:
+            if sid in self._tmps:
+                raise ValueError(f"strategy_id {sid!r} 가 연속되지 않는다(정렬 순서로 써야 한다)")
+            self._close()
+            tmp = self.paths[sid].with_name(self.paths[sid].name + ".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            self._tmps[sid] = tmp
+            self._writer = pq.ParquetWriter(tmp, self.schema, compression="snappy")
+            self._sid = sid
+        if len(df):
+            validate_roundtrips_net(df)
+            self._buf.append(pa.Table.from_pandas(df, schema=self.schema, preserve_index=False))
+            self._buf_rows += len(df)
+            if self._buf_rows >= ROW_GROUP_ROWS:
+                self._flush()
+
+    def _flush(self) -> None:
+        if self._buf:
+            self._writer.write_table(pa.concat_tables(self._buf))
+            self._buf, self._buf_rows = [], 0
+
+    def _close(self) -> None:
+        if self._writer is not None:
+            try:
+                self._flush()
+            finally:
+                self._writer.close()
+                self._writer, self._sid = None, None
+
+    def commit(self) -> None:
+        self._close()
+        for sid, tmp in self._tmps.items():
+            os.replace(tmp, self.paths[sid])
+        self._committed = True
+
+    def abort(self) -> None:
+        self._buf, self._buf_rows = [], 0
+        try:
+            if self._writer is not None:
+                self._writer.close()
+        finally:
+            self._writer, self._sid = None, None
+            for tmp in self._tmps.values():
+                tmp.unlink(missing_ok=True)
+
+    def __enter__(self) -> RoundtripSink:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is not None or not self._committed:
+            self.abort()
+
+
+def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], fee_profile: str | Mapping,
+             start: date, end: date, gate: Mapping | None, sink) -> list[dict]:
+    """run 별 생성 → 비용 → `sink.write(strategy_id, net)` → 요약. (strategy_id, param_id) 정렬 요약 목록을 돌려준다.
+
+    `[start, end)` 반열린 구간. params 를 (strategy_id, param_id) 로 stable 정렬해 실행하고 run 내 `trade_id` 가
+    0..n-1 오름차순이므로, 싱크가 받는 순서가 곧 `RT_SORT_KEY` 순서다. 거래 0건 run 도 0행 프레임을 넘긴다
+    (실행한 트리거는 0행 parquet 라도 생긴다). net 프레임은 넘긴 뒤 버린다 — 누적은 싱크의 책임.
+    """
+    ordered = sorted(params_list, key=lambda p: (p.strategy_id, p.param_id))
     summaries = []
     t0 = time.monotonic()
-    for i, p in enumerate(params_list, 1):
+    for i, p in enumerate(ordered, 1):
         res = generate_run(bars, p)
         net = costs.apply_costs(res.roundtrips, fee_profile)
+        sink.write(p.strategy_id, net)
         summary = summarize_net_run(net, start, end, gate)
         summary["strategy_id"] = p.strategy_id  # 0건 run 은 metrics 가 None 으로 둔다
         summary["param_id"] = p.param_id
         summaries.append(summary)
-        parts = frames.setdefault(p.strategy_id, [])
-        if len(net):
-            parts.append(net)
-        if i % PROGRESS_EVERY == 0 or i == len(params_list):
-            log.info("run %d/%d (%.1fs)", i, len(params_list), time.monotonic() - t0)
-
-    out = {}
-    for sid, parts in frames.items():
-        if parts:
-            df = pd.concat(parts, ignore_index=True)
-            df = df.sort_values(RT_SORT_KEY, kind="stable", ignore_index=True)
-        else:
-            df = empty_frame(ROUNDTRIPS_NET)
-        out[sid] = validate_roundtrips_net(df)
+        del res, net
+        if i % PROGRESS_EVERY == 0 or i == len(ordered):
+            log.info("run %d/%d (%.1fs)", i, len(ordered), time.monotonic() - t0)
     summaries.sort(key=lambda s: (s["strategy_id"], s["param_id"]))
-    return out, summaries
+    return summaries
 
 
 def build_report(start: date, end: date, symbol: str, bars: pd.DataFrame, axes: dict, fee_profile: str,
@@ -138,16 +207,11 @@ def output_paths(out_dir: Path, fee_profile: str, start: date, end: date, strate
     return paths
 
 
-def write_outputs(out_dir: Path, fee_profile: str, start: date, end: date,
-                  roundtrips: dict[str, pd.DataFrame], report: dict) -> dict[str, Path]:
-    """net 라운드트립 parquet(트리거별)·JSON·MD 를 원자적으로 쓴다. 쓴 경로를 돌려준다."""
-    paths = output_paths(Path(out_dir), fee_profile, start, end, sorted(roundtrips))
-    for sid, df in sorted(roundtrips.items()):
-        normalize.write_parquet_atomic(df, paths[sid])
+def write_outputs(paths: Mapping[str, Path], report: dict) -> None:
+    """요약 JSON·MD 를 원자적으로 쓴다(net 라운드트립 parquet 는 `RoundtripSink` 가 쓴다)."""
     text = json.dumps(report, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
     _write_text_atomic(text, paths["json"])
     _write_text_atomic(render_markdown(report), paths["md"])
-    return paths
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,9 +250,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         bars = load_bars(a.start, a.end - timedelta(days=1), a.symbol, out_dir=a.data_dir)  # store 는 종료일 포함
         log.info("1분봉 %d개 로드, run %d개 실행 (fee %s)", len(bars), len(params_list), a.fee_profile)
-        net, summaries = run_grid(bars, params_list, a.fee_profile, a.start, a.end, gate)
-        report = build_report(a.start, a.end, a.symbol, bars, axes, a.fee_profile, gate, summaries)
-        paths = write_outputs(a.out, a.fee_profile, a.start, a.end, net, report)
+        paths = output_paths(a.out, a.fee_profile, a.start, a.end, sorted({p.strategy_id for p in params_list}))
+        with RoundtripSink(paths) as sink:
+            summaries = run_grid(bars, params_list, a.fee_profile, a.start, a.end, gate, sink)
+            report = build_report(a.start, a.end, a.symbol, bars, axes, a.fee_profile, gate, summaries)
+            sink.commit()
+        write_outputs(paths, report)
     except Exception:
         log.exception("백테스트 실패")
         return 1
