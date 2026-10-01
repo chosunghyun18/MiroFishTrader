@@ -11,6 +11,7 @@ from src.analysis.features import compute_features
 from src.analysis.synthetic import (
     MAX_EXPOSURE,
     MAX_LEVERAGE,
+    MAX_ORDER_QTY,
     Params,
     entry_signals,
     generate_run,
@@ -313,6 +314,59 @@ def test_position_size_capped():
     qty, capped = position_size(1.0, 10007.0, "long", stop_pct=0.5, risk_pct=5)
     assert capped
     assert qty == math.floor(4 * 10007.0)
+
+
+@pytest.mark.parametrize("stop_pct, planned_loss", [(0.5, 5.025126), (2, 20.408163)])
+def test_position_size_q_max_hand_examples(stop_pct, planned_loss):
+    """설계 손 계산 (a)(b): E=500 XBT, p=10,000, risk 5% → q_max 10,000,000 이 지배."""
+    qty, capped = position_size(500.0, 10000.0, "long", stop_pct=stop_pct, risk_pct=5)
+    assert (qty, capped) == (10_000_000, True)
+    assert qty / 10000.0 / 500.0 == 2.0
+    stop = 10000.0 * (1 - stop_pct / 100)
+    assert -inverse_pnl("long", qty, 10000.0, stop) == pytest.approx(planned_loss, rel=1e-6)
+
+
+def test_position_size_q_max_short():
+    qty, capped = position_size(500.0, 10000.0, "short", stop_pct=2, risk_pct=5)
+    assert MAX_ORDER_QTY == 10_000_000
+    assert (qty, capped) == (MAX_ORDER_QTY, True)  # q_risk 12,750,000 < q_cap 20,000,000 → q_max 만 걸림
+
+
+def test_position_size_q_max_boundary():
+    # 바로 아래: 4배 상한 4·E·p = 9,999,996 < 1e7 → 기존 공식(4배 절단) 그대로
+    qty, capped = position_size(249.9999, 10000.0, "long", stop_pct=0.5, risk_pct=5)
+    assert (qty, capped) == (math.floor(MAX_EXPOSURE * 249.9999 * 10000.0), True)
+    assert qty < MAX_ORDER_QTY
+    # 바로 아래: q_risk < q_cap 이고 q_risk < 1e7 → 절단 없음
+    e = 400.0
+    q_risk = 0.05 * e * 10000.0 * 0.98 / 0.02  # 9,800,000
+    qty, capped = position_size(e, 10000.0, "long", stop_pct=2, risk_pct=5)
+    assert (qty, capped) == (math.floor(q_risk), False)
+
+
+def _staircase(cycles=400, step=0.03):
+    """평평 봉 → h1 신호 봉 → high 가 +step 인 봉을 반복하는 계단 상승. 매 주기 익절로 자본이 복리로 커진다."""
+    rows = [B] * 5
+    for k in range(cycles):
+        lv = B * (1 + step) ** k
+        lx, up = lv * 1.001, lv * (1 + step)
+        rows += [lv, (lv, lx, lv, lx), (lx, up, lx, up)]
+    return rows
+
+
+def test_extreme_compounding_does_not_overflow():
+    """회귀: q_max 가 없으면 qty 가 int64 를 넘어 _to_frame 에서 OverflowError(T-20261002-41)."""
+    bars = _bars(_staircase())
+    assert len(bars) == 1205
+    rt = generate_run(bars, h1(n=3, stop_pct=0.5, tp_r=3, max_hold=60, risk_pct=5)).roundtrips
+    validate_roundtrips(rt)
+    assert len(rt) == 400
+    assert rt["qty"].max() == MAX_ORDER_QTY
+    assert (rt["qty"] <= MAX_ORDER_QTY).all()
+    at_max = rt["qty"] == MAX_ORDER_QTY
+    assert at_max.sum() > 0
+    assert rt.loc[at_max, "size_capped"].all()
+    assert np.isfinite(rt["equity_before"]).all()
 
 
 def test_hard_guard_raises():

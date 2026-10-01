@@ -21,7 +21,7 @@
 | P1·P2 | 동시 포지션 1개, 보유 중 신호 무시, 반전 없음 |
 | P3 | X1·X2 청산 봉 마감에 다시 평가, X3·X4 신호 봉 마감 신호는 버림(X3 체결 봉 마감부터 평가) |
 | P4 | 계약 수 < 1 이면 건너뛰고 skipped_min_qty += 1, 청산 후 자본 ≤ 0 이면 halted=True 로 중단 |
-| 사이징 | 롱 q = r·E·p·(1−s)/s, 숏 q = r·E·p·(1+s)/s, 상한 4·E·p, floor. 예정 손실 > 30%·E 이면 ValueError |
+| 사이징 | 롱 q = r·E·p·(1−s)/s, 숏 q = r·E·p·(1+s)/s, 상한 4·E·p 와 q_max 10,000,000, floor. 예정 손실 > 30%·E 이면 ValueError |
 
 - 손익은 인버스 공식(XBT)·gross 다. 수수료·슬리피지·펀딩·강제청산·틱 반올림은 Phase 3 범위.
 - 하드 가드(R4) `ValueError` 는 `generate_run` 이 잡지 않고 전파한다(`halted` 는 P4 자본 소진 전용).
@@ -51,6 +51,7 @@ RULESET_VERSION = "v1"
 RISK_GUARD_PCT = 30.0
 MAX_LEVERAGE = 10.0
 MAX_EXPOSURE = 4.0  # R2(10배)는 R3(4배)에 지배되어 사이징에서는 4배만 자른다.
+MAX_ORDER_QTY = 10_000_000  # 사이징 3.5단계 q_max: BitMEX XBTUSD maxOrderQty. qty 를 int64 범위 안으로 묶는다.
 TRIGGERS = ("h1", "h2", "h3")
 ENTRY_REASON = {"h1": "h1_breakout", "h2": "h2_momentum", "h3": "h3_meanrev"}
 ONE_MIN = pd.Timedelta(minutes=1)
@@ -181,7 +182,7 @@ def inverse_pnl(side: str, qty: float, entry: float, exit_: float) -> float:
 
 def position_size(equity: float, entry_price: float, side: str,
                   stop_pct: float, risk_pct: float) -> tuple[int, bool]:
-    """설계 "사이징 공식" 1~5단계 → (계약 수, 4배 상한 절단 여부). 예정 손실 > 30%·E 이면 ValueError."""
+    """설계 "사이징 공식" 1~5단계 → (계약 수, 4배 또는 q_max 상한 절단 여부). 예정 손실 > 30%·E 이면 ValueError."""
     s = stop_pct / 100.0
     r = risk_pct / 100.0
     e, p = equity, entry_price
@@ -192,13 +193,13 @@ def position_size(equity: float, entry_price: float, side: str,
         q_risk = r * e * p * (1 + s) / s
         stop = p * (1 + s)
     q_cap = MAX_EXPOSURE * e * p
-    qty = math.floor(min(q_risk, q_cap))
+    qty = math.floor(min(q_risk, q_cap, MAX_ORDER_QTY))
     planned_loss = -inverse_pnl(side, qty, p, stop)
     if planned_loss > RISK_GUARD_PCT / 100.0 * e:
         raise ValueError(
             f"R4 하드 가드: 예정 손실 {planned_loss:.6g} XBT > 자본의 {RISK_GUARD_PCT:g}% "
             f"(equity={e:g}, stop_pct={stop_pct:g}, risk_pct={risk_pct:g})")
-    return qty, bool(q_risk > q_cap)
+    return qty, bool(q_risk > min(q_cap, MAX_ORDER_QTY))
 
 
 @dataclass(frozen=True)
