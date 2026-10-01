@@ -1,0 +1,22 @@
+# AgentTrading 설정 예시 — 복사해서 config/config.yaml 로 쓰고, 키는 .env 에 둔다.
+
+ingest:
+  # Phase 0에서 확정. 확정 전까지 비워둔다.
+  sources: []
+  out_dir: data/raw
+
+backtest:
+  initial_capital: 10000      # USDT
+  taker_fee: 0.0004           # 0.04%
+  maker_fee: 0.0002
+  slippage_bps: 2             # 2bp
+  # 백테스트 통과 기준 — 미달 전략은 에이전트로 보내지 않는다
+  gate:
+    min_trades: 100
+    min_sharpe: 1.0
+    max_drawdown: 0.30
+
+agent:
+  mode: paper                 # paper | live — live 전환은 수동 판단
+  symbol: BTCUSDT
+  max_leverage: 3

@@ -1,0 +1,16 @@
+# 가상환경
+.venv/
+
+# 원본 거래 기록 — 용량/저작권 문제로 커밋하지 않는다
+data/raw/*
+!data/raw/.gitkeep
+
+# 분석 산출물
+data/out/
+
+# 설정 실값
+config/config.yaml
+
+# work repo 루트 .gitignore의 `shared/` (MiroFishTrader 런타임 폴더용) 예외 —
+# AgentTrading의 src/shared 는 소스 코드다.
+!src/shared/

@@ -1,0 +1,14 @@
+# 데이터 처리
+pandas>=2.2
+numpy>=1.26
+
+# 수집
+requests>=2.32
+beautifulsoup4>=4.12
+
+# 설정
+pyyaml>=6.0
+python-dotenv>=1.0
+
+# 테스트
+pytest>=8.0
