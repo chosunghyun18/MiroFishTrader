@@ -1,7 +1,7 @@
 # AgentTrading 설정 예시 — 복사해서 config/config.yaml 로 쓰고, 키는 .env 에 둔다.
 
 ingest:
-  # 확정: bitmex_public (시장 체결 테이프). 워뇨띠 행동 데이터 소스는 Phase 0 조사 중.
+  # 확정: bitmex_public (시장 체결 테이프). 행동 표본은 합성 전략(Design Spec 6절) — aoa 원본은 진위 확인 후 조건부 추가.
   sources: [bitmex_public]
   out_dir: data/raw
 

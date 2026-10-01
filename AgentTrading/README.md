@@ -35,8 +35,9 @@ AgentTrading/
 
 ## 상태
 
-Phase 1 — 데이터 적재 진행 중. BitMEX 공개 체결 다운로더(`src/ingest/bitmex_public.py`),
+Phase 1(수집 파이프라인) 종료 2026-10-02 — 시장 데이터(BitMEX XBTUSD) 기준. BitMEX 공개 체결 다운로더(`src/ingest/bitmex_public.py`),
 정규화 파서·1분봉 리샘플·증분 정규화 CLI(`src/ingest/normalize.py`)·구간 로더(`src/ingest/store.py`) 완료.
+다음: Phase 2 패턴 정량화(`src/analysis`). 행동 표본은 합성 전략, aoa 원본은 진위 확인 후 조건부.
 
 ## 데이터 — BitMEX 공개 거래 장부
 
