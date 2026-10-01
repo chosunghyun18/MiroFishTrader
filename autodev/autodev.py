@@ -963,6 +963,57 @@ def cmd_stop(args) -> None:
 
 
 # ── 대시보드 (로컬 웹 페이지, 실행 중인 루프와 별개 프로세스) ────────────────
+def pipeline_html() -> str:
+    """프로젝트의 data/logs/*_pipeline.log 를 읽어 다운로드·단계 진행을 그린다."""
+    import html
+    esc = html.escape
+    out = ""
+    for log_path in sorted(REPO.glob("*/data/logs/*_pipeline.log")):
+        state = log_path.with_suffix(".state")
+        steps = state.read_text(encoding="utf-8").splitlines() if state.exists() else []
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        # 가장 최근 다운로드 묶음
+        total_n, total_gb, start_i = 0, 0.0, None
+        for i, l in enumerate(lines):
+            m = re.search(r"받을 (\d+) \(([\d.]+) GB\)", l)
+            if m:
+                total_n, total_gb, start_i = int(m.group(1)), float(m.group(2)), i
+        files = []
+        if start_i is not None:
+            for l in lines[start_i:]:
+                m = re.match(r"(\S+ \S+),\d+ INFO \[(\d+)/(\d+)\] (\S+) ([\d.]+)MB ([\d.]+)s", l)
+                if m:
+                    files.append((dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"), int(m.group(2)),
+                                  m.group(4), float(m.group(5))))
+        done_n = files[-1][1] if files else 0
+        done_mb = sum(f[3] for f in files)
+        pct = done_mb / (total_gb * 1024) * 100 if total_gb else 0
+        speed, eta = "", ""
+        if len(files) >= 2:
+            recent = files[-30:]
+            secs = (recent[-1][0] - recent[0][0]).total_seconds() or 1
+            mbps = sum(f[3] for f in recent[1:]) / secs
+            left = total_gb * 1024 - done_mb
+            eta_t = now() + dt.timedelta(seconds=left / mbps) if mbps > 0 else None
+            speed = f"{mbps:.1f} MB/s"
+            eta = f"남은 {left/1024:.1f} GB · 완료 예상 {eta_t:%H:%M}" if eta_t and left > 0 else "다운로드 완료"
+        cur = files[-1][2].replace(".csv.gz", "") if files else ""
+        cur = f"{cur[:4]}-{cur[4:6]}-{cur[6:]}" if len(cur) == 8 else cur
+        failed = steps and steps[-1].split(" ", 2)[-1].startswith("실패")
+        alive = sh(["pgrep", "-f", log_path.stem.replace("_pipeline", "") + "_pipeline.sh"]).returncode == 0
+        badge = ('<span class="badge stop" style="background:var(--bad)">실패</span>' if failed else
+                 '<span class="badge run">실행 중</span>' if alive else '<span class="badge stop">멈춤/완료</span>')
+        step_rows = "".join(f"<tr><td class='id'>{esc(x[:19])}</td><td>{esc(x[20:])}</td></tr>"
+                            for x in dict.fromkeys(steps))
+        out += (f'<section><h2>{esc(log_path.parts[-4])} · {esc(log_path.stem)} {badge}</h2>'
+                + (f'<div class="ql"><span>다운로드 {done_n}/{total_n} 파일 · {done_mb/1024:.1f}/{total_gb:.1f} GB · 현재 {esc(cur)}</span>'
+                   f'<span>{pct:.0f}%</span></div>'
+                   f'<div class="track big"><div class="fill" style="width:{min(pct,100):.1f}%;background:var(--acc)"></div></div>'
+                   f'<div class="act">{esc(speed)} · {esc(eta)}</div>' if total_n else "")
+                + f'<table>{step_rows}</table></section>')
+    return out
+
+
 def dash_html() -> str:
     import html
     esc = html.escape
@@ -1038,6 +1089,7 @@ pre{{margin:0;font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;wo
 <section><h1>autodev 진행 상황 {state}</h1><div>{nowline}</div>
 <div class="act">{esc(action) if alive else ""}</div>{quota}
 <div class="act">갱신 {now():%H:%M:%S} · 5초마다 자동 새로고침</div></section>
+{pipeline_html()}
 {cards}
 <section><h2>최근 로그</h2><pre>{tail}</pre></section>
 </main></body></html>"""
