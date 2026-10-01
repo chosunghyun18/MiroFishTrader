@@ -306,3 +306,38 @@ def test_roundtrips_net_empty_and_violations():
     bad["exit_liquidity"] = pd.array(["post_only"], dtype="string")
     with pytest.raises(SchemaError, match="허용값"):
         sc.validate_roundtrips_net(bad)
+
+
+# phase3-backtest.md "펀딩 모델" 8항 표에서 옮긴 기대값
+DOC_ROUNDTRIPS_NET_FUNDING_EXTRA = [("n_funding", I, False), ("funding_xbt", F, False)]
+
+
+def test_roundtrips_net_funding_definition_matches_doc():
+    got = [(c.name, "ts" if c.dtype is sc.UTC_NS else c.dtype, c.nullable)
+           for c in sc.ROUNDTRIPS_NET_FUNDING.columns]
+    assert got == DOC_ROUNDTRIPS + DOC_ROUNDTRIPS_NET_EXTRA + DOC_ROUNDTRIPS_NET_FUNDING_EXTRA
+    assert len(sc.ROUNDTRIPS_NET_FUNDING.columns) == 34
+    assert sc.ROUNDTRIPS_NET_FUNDING.key == ("strategy_id", "param_id", "trade_id")
+
+
+def test_roundtrips_net_funding_empty_and_violations():
+    empty = sc.empty_frame(sc.ROUNDTRIPS_NET_FUNDING)
+    assert len(empty) == 0
+    assert list(empty.columns) == sc.ROUNDTRIPS_NET_FUNDING.column_names
+    assert sc.validate_roundtrips_net_funding(empty) is empty
+    with pytest.raises(SchemaError, match="예상 밖"):
+        sc.validate_roundtrips_net(empty)
+    with pytest.raises(SchemaError, match="누락"):
+        sc.validate_roundtrips_net_funding(sc.empty_frame(sc.ROUNDTRIPS_NET))
+
+    from tests.test_backtest_costs import EX_A, make_rt
+    from src.backtest.costs import apply_costs
+    net = apply_costs(make_rt([EX_A]), "default")
+    df = net.assign(n_funding=np.array([0], dtype="int64"), funding_xbt=[-0.001])
+    assert sc.validate_roundtrips_net_funding(df) is df  # funding_xbt 음수 허용
+    bad = df.assign(n_funding=np.array([-1], dtype="int64"))
+    with pytest.raises(SchemaError, match="n_funding"):
+        sc.validate_roundtrips_net_funding(bad)
+    bad = df.assign(n_funding=[0.0])
+    with pytest.raises(SchemaError, match="n_funding"):
+        sc.validate_roundtrips_net_funding(bad)

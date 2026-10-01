@@ -183,6 +183,18 @@ FUNDING = TableSchema(
 )
 
 
+# 펀딩 반영 net 라운드트립 = ROUNDTRIPS_NET 32열 + 펀딩 2열. net_pnl_xbt·net_ret 는 펀딩 포함 값.
+# 설계 근거: phase3-backtest.md "펀딩 모델" 8항.
+ROUNDTRIPS_NET_FUNDING = TableSchema(
+    name="roundtrips_net_funding",
+    columns=ROUNDTRIPS_NET.columns + (
+        ColumnSpec("n_funding", INT64),
+        ColumnSpec("funding_xbt", FLOAT64),
+    ),
+    key=ROUNDTRIPS.key,
+)
+
+
 def _dtype_problem(actual, expected) -> str | None:
     """dtype 이 맞으면 None, 아니면 위반 설명."""
     if expected is UTC_NS or isinstance(expected, pd.DatetimeTZDtype):
@@ -269,6 +281,14 @@ def validate_roundtrips(df: pd.DataFrame, strict: bool = True) -> pd.DataFrame:
 
 def validate_roundtrips_net(df: pd.DataFrame, strict: bool = True) -> pd.DataFrame:
     return validate(df, ROUNDTRIPS_NET, strict=strict)
+
+
+def validate_roundtrips_net_funding(df: pd.DataFrame, strict: bool = True) -> pd.DataFrame:
+    validate(df, ROUNDTRIPS_NET_FUNDING, strict=strict)
+    n = int((df["n_funding"].to_numpy() < 0).sum())
+    if n:
+        raise SchemaError(f"[roundtrips_net_funding] 컬럼 'n_funding' 음수 {n}건 (≥ 0 필요)")
+    return df
 
 
 def validate_funding(df: pd.DataFrame) -> pd.DataFrame:
