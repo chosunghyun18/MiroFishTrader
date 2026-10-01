@@ -2,7 +2,8 @@
 
 파서(ingest)·리샘플·분석 모듈은 컬럼·dtype 정의를 여기서만 가져온다.
 설계 근거(단일 기준): Obsidian `Projects/work/AgentTrading/design/phase1-ingest-schema.md`
-(roundtrips 는 `design/phase2-synthetic-strategy.md` "라운드트립 스키마").
+(roundtrips 는 `design/phase2-synthetic-strategy.md` "라운드트립 스키마",
+roundtrips_net 은 `design/phase3-backtest.md` "net 열").
 문서와 이 파일이 다르면 문서를 따르고, 문서를 먼저 고친 뒤 이 파일을 맞춘다.
 
     from src.shared.schema import TRADES, validate_trades, empty_frame
@@ -31,6 +32,7 @@ SOURCES = frozenset({"aoa", "synthetic"})
 RT_SIDES = frozenset({"long", "short"})
 ENTRY_REASONS = frozenset({"h1_breakout", "h2_momentum", "h3_meanrev"})
 EXIT_REASONS = frozenset({"stop", "take_profit", "time", "end_of_data"})
+LIQUIDITY = frozenset({"maker", "taker"})
 
 
 class SchemaError(ValueError):
@@ -152,6 +154,22 @@ ROUNDTRIPS = TableSchema(
     key=("strategy_id", "param_id", "trade_id"),
 )
 
+# net 라운드트립 = ROUNDTRIPS 24열 + 비용 반영 8열. 설계 근거: phase3-backtest.md "net 열".
+ROUNDTRIPS_NET = TableSchema(
+    name="roundtrips_net",
+    columns=ROUNDTRIPS.columns + (
+        ColumnSpec("entry_liquidity", STRING, allowed=LIQUIDITY),
+        ColumnSpec("exit_liquidity", STRING, allowed=LIQUIDITY),
+        ColumnSpec("entry_fill_price", FLOAT64),
+        ColumnSpec("exit_fill_price", FLOAT64),
+        ColumnSpec("fee_xbt", FLOAT64),
+        ColumnSpec("slippage_xbt", FLOAT64),
+        ColumnSpec("net_pnl_xbt", FLOAT64),
+        ColumnSpec("net_ret", FLOAT64),
+    ),
+    key=ROUNDTRIPS.key,
+)
+
 
 def _dtype_problem(actual, expected) -> str | None:
     """dtype 이 맞으면 None, 아니면 위반 설명."""
@@ -235,6 +253,10 @@ def validate_fills(df: pd.DataFrame) -> pd.DataFrame:
 
 def validate_roundtrips(df: pd.DataFrame, strict: bool = True) -> pd.DataFrame:
     return validate(df, ROUNDTRIPS, strict=strict)
+
+
+def validate_roundtrips_net(df: pd.DataFrame, strict: bool = True) -> pd.DataFrame:
+    return validate(df, ROUNDTRIPS_NET, strict=strict)
 
 
 def empty_frame(schema: TableSchema) -> pd.DataFrame:

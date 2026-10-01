@@ -265,3 +265,44 @@ def test_roundtrips_bool_dtype():
     as_object = empty.assign(size_capped=pd.Series([], dtype=object))
     with pytest.raises(SchemaError, match="size_capped"):
         sc.validate_roundtrips(as_object)
+
+
+# phase3-backtest.md "net 열" 표에서 옮긴 기대값
+DOC_ROUNDTRIPS_NET_EXTRA = [
+    ("entry_liquidity", S, False), ("exit_liquidity", S, False),
+    ("entry_fill_price", F, False), ("exit_fill_price", F, False), ("fee_xbt", F, False),
+    ("slippage_xbt", F, False), ("net_pnl_xbt", F, False), ("net_ret", F, False),
+]
+
+
+def test_roundtrips_net_definition_matches_doc():
+    got = [(c.name, "ts" if c.dtype is sc.UTC_NS else c.dtype, c.nullable)
+           for c in sc.ROUNDTRIPS_NET.columns]
+    assert got == DOC_ROUNDTRIPS + DOC_ROUNDTRIPS_NET_EXTRA
+    assert len(sc.ROUNDTRIPS_NET.columns) == 32
+    assert sc.ROUNDTRIPS_NET.key == ("strategy_id", "param_id", "trade_id")
+    assert sc.LIQUIDITY == {"maker", "taker"}
+    allowed = {c.name: c.allowed for c in sc.ROUNDTRIPS_NET.columns[24:] if c.allowed is not None}
+    assert allowed == {"entry_liquidity": {"maker", "taker"}, "exit_liquidity": {"maker", "taker"}}
+
+
+def test_roundtrips_net_empty_and_violations():
+    empty = sc.empty_frame(sc.ROUNDTRIPS_NET)
+    assert sc.validate_roundtrips_net(empty) is empty
+    with pytest.raises(SchemaError, match="예상 밖"):
+        sc.validate_roundtrips(empty)
+    assert sc.validate_roundtrips(empty, strict=False) is empty
+    with pytest.raises(SchemaError, match="누락"):
+        sc.validate_roundtrips_net(sc.empty_frame(sc.ROUNDTRIPS))
+
+    from tests.test_backtest_costs import EX_A, make_rt
+    from src.backtest.costs import apply_costs
+    net = apply_costs(make_rt([EX_A]), "default")
+    bad = net.copy()
+    bad.loc[0, "fee_xbt"] = np.nan
+    with pytest.raises(SchemaError, match="fee_xbt"):
+        sc.validate_roundtrips_net(bad)
+    bad = net.copy()
+    bad["exit_liquidity"] = pd.array(["post_only"], dtype="string")
+    with pytest.raises(SchemaError, match="허용값"):
+        sc.validate_roundtrips_net(bad)
