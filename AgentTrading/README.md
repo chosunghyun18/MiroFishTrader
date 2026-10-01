@@ -35,7 +35,8 @@ AgentTrading/
 
 ## 상태
 
-Phase 0 — 데이터 소스 조사 중. BitMEX 공개 체결 장부 확인·다운로더 완료 (`src/ingest/bitmex_public.py`).
+Phase 1 — 데이터 적재 진행 중. BitMEX 공개 체결 다운로더(`src/ingest/bitmex_public.py`),
+정규화 파서·1분봉 리샘플·증분 정규화 CLI(`src/ingest/normalize.py`) 완료.
 
 ## 데이터 — BitMEX 공개 거래 장부
 
@@ -52,6 +53,24 @@ python -m src.ingest.bitmex_public download --start 2019-06-01 --end 2019-06-30 
 
 기본 상한 `--max-gb 5`, 다운로드 후 최소 여유 `--min-free-gb 20`. 넘으면 시작 전에 거부한다.
 저장 위치 `data/raw/bitmex/<dataset>/` (커밋 금지).
+
+### 정규화 (증분·재실행)
+
+받은 원본 일 파일을 정규화 체결(`trades`)과 1분봉(`bars_1m`)으로 바꿔 UTC 일별 parquet 로 저장한다.
+
+```bash
+python -m src.ingest.normalize --start 2019-06-01 --end 2019-06-30 --symbol XBTUSD
+# 옵션: --raw-dir data/raw/bitmex/trade (기본)  --out data/raw/normalized/bitmex (기본)
+```
+
+- 원본: `<raw-dir>/XBTUSD/YYYYMMDD.csv.gz`(`download --symbols XBTUSD` 결과) 우선, 없으면 전 종목 `<raw-dir>/YYYYMMDD.csv.gz`.
+  원본이 없는 날은 경고만 남기고 건너뛴다(종료코드 0).
+- 출력: `<out>/trades/XBTUSD/YYYYMMDD.parquet`, `<out>/bars_1m/XBTUSD/YYYYMMDD.parquet` — 임시 파일 후 원자적 교체.
+- 증분: `<out>/_manifest/XBTUSD.json` 에 원본 크기·mtime 을 기록해 변경 없는 날은 건너뛰고, 바뀐 날(과
+  마지막 close 가 바뀌어 영향받는 다음 날)만 다시 만든다. 같은 명령을 다시 실행하면 아무것도 다시 쓰지 않는다.
+- 중복: `trdMatchID` 기준 첫 행만 남기고, 다시 처리할 때는 그날 파일을 통째로 다시 쓴다.
+- 강제 재처리: manifest 파일(또는 그 안의 날짜 항목)을 지우고 다시 실행.
+- 처리 오류(그날 밖 체결·스키마 위반 등)는 즉시 종료코드 1. 그 전까지 끝난 날은 유지된다.
 
 로드맵과 단계별 완료 기준은 Obsidian `Projects/work/AgentTrading/task/todo.md` 참고.
 
