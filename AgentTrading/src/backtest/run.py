@@ -35,18 +35,25 @@
   `--start`/`--end` 와 함께 쓰면 2, `--fee-profile` 은 `default` 만. `--oos-log` 는 `--oos-final` 과만 쓴다.
   로그를 지우거나 덮어쓰는 코드는 없다 — 가드 해제는 사람 판단. DSR(N=756)은 참고값이며 판정에 넣지 않는다.
 - 결정성: 실행 시각·소요 시간은 파일에 넣지 않는다. 같은 입력이면 JSON·MD 바이트가 같다.
+- `--jobs N`(기본 1 = 순차): N ≥ 2 면 그리드 run 을 spawn 프로세스 풀에서 계산한다(bars 는 워커 initializer 로
+  워커당 1회 전달). 결과는 정렬된 run 순서로 받아(미완료 상한 `WINDOW_PER_JOB × N`) 싱크 쓰기는 메인만 하므로
+  산출물은 N 과 무관하게 같고, 메모리 상한 = 행 그룹 버퍼 + 2N run + 워커당 bars 사본. `--oos-final` 은 순차.
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import logging
 import math
+import multiprocessing
 import os
 import sys
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -149,28 +156,92 @@ class RoundtripSink:
             self.abort()
 
 
+def _compute_run(bars: pd.DataFrame, p: Params, fee_profile: str | Mapping, start: date, end: date,
+                 gate: Mapping | None, keep_net: bool = True) -> tuple[dict, pd.DataFrame | None]:
+    """run 1개: 생성 → 비용 → 요약(+ run 키). 순차·병렬 경로가 모두 이 함수를 부른다(결정성의 근거).
+
+    모듈 전역 이름(`generate_run`·`costs.apply_costs`·`summarize_net_run`)을 호출 시점에 찾는다(테스트 주입용).
+    `keep_net=False` 면 net 프레임 대신 None 을 돌려준다(요약만 필요한 그리드의 IPC 절약).
+    """
+    res = generate_run(bars, p)
+    net = costs.apply_costs(res.roundtrips, fee_profile)
+    del res
+    summary = _with_run_key(summarize_net_run(net, start, end, gate), p.strategy_id, p.param_id)
+    return summary, (net if keep_net else None)
+
+
+_WORKER: dict = {}  # spawn 워커 프로세스 전역: initializer 가 bars 등 run 공통 입력을 한 번만 받아 둔다
+
+
+def _init_worker(bars, fee_profile, start, end, gate, keep_net) -> None:
+    _WORKER.update(bars=bars, fee_profile=fee_profile, start=start, end=end, gate=gate, keep_net=keep_net)
+
+
+def _worker_run(p: Params) -> tuple[dict, pd.DataFrame | None]:
+    w = _WORKER
+    return _compute_run(w["bars"], p, w["fee_profile"], w["start"], w["end"], w["gate"], w["keep_net"])
+
+
+WINDOW_PER_JOB = 2  # 병렬 실행 시 미완료 run 상한 = WINDOW_PER_JOB × jobs (메모리 상한이 run 수와 무관)
+
+
+def _parallel_runs(bars, ordered: Sequence[Params], fee_profile, start, end, gate, keep_net: bool, jobs: int):
+    """spawn 프로세스 풀에서 run 을 계산해 `ordered` 순서 그대로 (summary, net) 을 하나씩 내놓는다.
+
+    정렬 순서 슬라이딩 윈도우: 미완료 future 를 최대 `WINDOW_PER_JOB × jobs` 개 제출하고 맨 앞 future 의
+    결과를 기다려 내놓은 뒤 하나 더 제출한다(완료 순서 무시). 예외·중단 시 남은 태스크를 취소한다.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    window = WINDOW_PER_JOB * jobs
+    ex = ProcessPoolExecutor(max_workers=jobs, mp_context=ctx, initializer=_init_worker,
+                             initargs=(bars, fee_profile, start, end, gate, keep_net))
+    pending: deque = deque()
+    it = iter(ordered)
+    ok = False
+    try:
+        for p in itertools.islice(it, window):
+            pending.append(ex.submit(_worker_run, p))
+        while pending:
+            result = pending.popleft().result()
+            nxt = next(it, None)
+            if nxt is not None:
+                pending.append(ex.submit(_worker_run, nxt))
+            yield result
+        ok = True
+    finally:
+        ex.shutdown(wait=True, cancel_futures=not ok)
+
+
 def run_grid(bars: pd.DataFrame, params_list: Sequence[Params], fee_profile: str | Mapping,
-             start: date, end: date, gate: Mapping | None, sink) -> list[dict]:
+             start: date, end: date, gate: Mapping | None, sink, jobs: int = 1) -> list[dict]:
     """run 별 생성 → 비용 → `sink.write(strategy_id, net)` → 요약. (strategy_id, param_id) 정렬 요약 목록을 돌려준다.
 
     `[start, end)` 반열린 구간. params 를 (strategy_id, param_id) 로 stable 정렬해 실행하고 run 내 `trade_id` 가
     0..n-1 오름차순이므로, 싱크가 받는 순서가 곧 `RT_SORT_KEY` 순서다. 거래 0건 run 도 0행 프레임을 넘긴다
     (실행한 트리거는 0행 parquet 라도 생긴다). net 프레임은 넘긴 뒤 버린다 — 누적은 싱크의 책임.
+    `jobs ≥ 2` 면 run 계산을 spawn 프로세스 풀에서 하되 결과는 정렬 순서로 받아 싱크 쓰기는 이 프로세스에서만
+    한다(`_parallel_runs`) — 출력은 `jobs=1` 과 같다. `_DiscardSink` 면 워커는 요약만 돌려준다.
     """
+    if jobs < 1:
+        raise ValueError(f"jobs 는 1 이상이어야 한다: {jobs}")
     ordered = sorted(params_list, key=lambda p: (p.strategy_id, p.param_id))
+    keep_net = not isinstance(sink, _DiscardSink)
+    if jobs >= 2 and len(ordered) >= 2:
+        results = _parallel_runs(bars, ordered, fee_profile, start, end, gate, keep_net, jobs)
+    else:
+        results = (_compute_run(bars, p, fee_profile, start, end, gate, keep_net) for p in ordered)
     summaries = []
     t0 = time.monotonic()
-    for i, p in enumerate(ordered, 1):
-        res = generate_run(bars, p)
-        net = costs.apply_costs(res.roundtrips, fee_profile)
-        sink.write(p.strategy_id, net)
-        summary = summarize_net_run(net, start, end, gate)
-        summary["strategy_id"] = p.strategy_id  # 0건 run 은 metrics 가 None 으로 둔다
-        summary["param_id"] = p.param_id
-        summaries.append(summary)
-        del res, net
-        if i % PROGRESS_EVERY == 0 or i == len(ordered):
-            log.info("run %d/%d (%.1fs)", i, len(ordered), time.monotonic() - t0)
+    try:
+        for i, (p, (summary, net)) in enumerate(zip(ordered, results), 1):
+            if keep_net:
+                sink.write(p.strategy_id, net)
+            summaries.append(summary)
+            del net
+            if i % PROGRESS_EVERY == 0 or i == len(ordered):
+                log.info("run %d/%d (%.1fs)", i, len(ordered), time.monotonic() - t0)
+    finally:
+        results.close()  # 싱크 쓰기 실패 등으로 빠져나오면 풀의 남은 태스크를 바로 취소한다
     summaries.sort(key=lambda s: (s["strategy_id"], s["param_id"]))
     return summaries
 
@@ -238,13 +309,14 @@ def _with_run_key(summary: dict, sid, pid) -> dict:
 
 def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Sequence[Params],
                     gate: Mapping | None = None, sample=(SAMPLE_START, OOS_START),
-                    n_trials: int = N_TRIALS) -> dict:
+                    n_trials: int = N_TRIALS, jobs: int = 1) -> dict:
     """폴드별 학습 그리드(`default`) → `select_params` → 검증 실행(`default`·`bybit`) → 이어 붙인 곡선·DSR 리포트.
 
     `load_bars(start, end)` 는 반열린 `[start, end)` UTC 자정 Timestamp 를 받아 1분봉을 돌려주는 주입 함수다.
     학습 구간을 먼저 읽고 선택이 끝난 뒤에만 검증 구간을 읽는다. 선택 없음 폴드는 검증 바를 읽지 않고
     거래 0·현금 보유로 요약한다. V 는 표본 전체 `risk_pct = 1` run 기준, `selection` 은 `sample` 이 기본 표본
     전체일 때만 `make_selection` 결과(그 외 `None`). 반환 dict 의 NaN 은 float 그대로(JSON 변환은 호출자).
+    `jobs` 는 학습·표본 전체 그리드 `run_grid` 에만 넘긴다(검증 run 1개는 순차).
     """
     g = resolve_gate(gate)
     s, e = check_sample_range(*sample)
@@ -255,7 +327,7 @@ def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Seq
     test_nets: dict[str, list] = {name: [] for name in PROFILE_NAMES}
     for i, f in enumerate(folds, 1):
         bars = _load_range(load_bars, f.train_start, f.train_end)
-        train = run_grid(bars, params_list, "default", f.train_start, f.train_end, g, _DiscardSink())
+        train = run_grid(bars, params_list, "default", f.train_start, f.train_end, g, _DiscardSink(), jobs)
         del bars
         sel = select_params(train, g)
         test = {}
@@ -294,7 +366,7 @@ def run_walkforward(folds: Sequence[Fold], load_bars: Callable, params_list: Seq
     del test_nets
 
     bars = _load_range(load_bars, s, e)
-    full = run_grid(bars, params_list, "default", s, e, g, _DiscardSink())
+    full = run_grid(bars, params_list, "default", s, e, g, _DiscardSink(), jobs)
     del bars
     rv = representative_var(full, params_list)
     full_sel = select_params(full, g)
@@ -652,6 +724,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--oos-log", type=Path, default=None, metavar="PATH",
                    help=f"OOS 접근 로그 경로 (기본 {OOS_LOG_PATH}, --oos-final 과만). 테스트·재현용 — "
                         "로그 삭제·가드 해제는 사람")
+    p.add_argument("--jobs", type=int, default=1, metavar="N",
+                   help="run 병렬 프로세스 수 (기본 1 = 순차). 워커마다 bars 사본을 들므로 메모리 ≈ N × bars."
+                        " 결과는 N 과 무관하게 같다. --oos-final 은 run 1개라 효과 없음")
     return p
 
 
@@ -659,6 +734,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = build_parser()
     a = parser.parse_args(argv)
+    if a.jobs < 1:
+        parser.error(f"--jobs 는 1 이상이어야 한다: {a.jobs}")
     if a.oos_final is not None:
         if a.walkforward:
             parser.error("--oos-final 은 --walkforward 와 함께 쓸 수 없다")
@@ -696,7 +773,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.info("1분봉 %d개 로드, run %d개 실행 (fee %s)", len(bars), len(params_list), a.fee_profile)
         paths = output_paths(a.out, a.fee_profile, a.start, a.end, sorted({p.strategy_id for p in params_list}))
         with RoundtripSink(paths) as sink:
-            summaries = run_grid(bars, params_list, a.fee_profile, a.start, a.end, gate, sink)
+            summaries = run_grid(bars, params_list, a.fee_profile, a.start, a.end, gate, sink, a.jobs)
             report = build_report(a.start, a.end, a.symbol, bars, axes, a.fee_profile, gate, summaries)
             sink.commit()
         write_outputs(paths, report)
@@ -712,7 +789,7 @@ def _main_walkforward(a: argparse.Namespace, axes: dict, params_list: Sequence[P
     paths = walkforward_paths(a.out)
     try:
         engine = run_walkforward(make_folds(), store_loader(a.symbol, a.data_dir), params_list,
-                                 gate=resolve_gate(None))
+                                 gate=resolve_gate(None), jobs=a.jobs)
         report = build_walkforward_report(engine, a.symbol, axes)
         write_walkforward_outputs(paths, report)
     except Exception:
