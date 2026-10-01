@@ -50,6 +50,7 @@ nohup autodev/autodev run -P AgentTrading > /tmp/autodev.out 2>&1 &
 | `split -P <프로젝트> [-t "주제"]` | 태스크 파일로 분해만 한다 (실행하지 않음) |
 | `status [-P <프로젝트>] [--all]` | 큐 현황 |
 | `quota [--cached]` | 5시간 창·주간 창 사용률과 리셋 시각. 종료코드 0=여유, 1=상한 도달 |
+| `dash` | 진행 상황 대시보드를 브라우저로 띄운다. 루프와 별개 프로세스이고 5초마다 새로고침된다 |
 | `stop` | 현재 단계가 끝나면 루프를 멈춘다 |
 
 `run` 의 주요 옵션: `--max-hours 10`, `--max-tasks 30`, `--weekly-budget 25`(한 번의 실행이 쓸 주간 사용량 %p),

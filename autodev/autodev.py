@@ -957,6 +957,112 @@ def cmd_stop(args) -> None:
     print("STOP 요청됨 — 현재 단계가 끝나면 루프가 멈춥니다.")
 
 
+# ── 대시보드 (로컬 웹 페이지, 실행 중인 루프와 별개 프로세스) ────────────────
+def dash_html() -> str:
+    import html
+    esc = html.escape
+    alive = sh(["pgrep", "-f", "autodev.py run"]).returncode == 0
+    logs = sorted((TOOL_DIR / "logs").glob("*.out"), key=lambda f: f.stat().st_mtime)
+    lines = logs[-1].read_text(encoding="utf-8", errors="replace").splitlines() if logs else []
+    main = [l for l in lines if not l.startswith("    · ")]
+    phase, tid, since, action = "", "", "", ""
+    for l in reversed(lines):
+        if not action and l.startswith("    · "):
+            action = l[6:]
+        m = re.match(r"\[(\d\d:\d\d:\d\d)\] ▶ (\w+) (\S+)", l)
+        if m:
+            since, phase, tid = m.groups()
+            break
+    wait = next((l for l in reversed(main[-3:]) if "⏸" in l), "")
+    snap = load_snapshot() or {}
+
+    def bar(pct, label, extra=""):
+        if pct is None:
+            return ""
+        color = "var(--bad)" if pct >= 85 else "var(--warn)" if pct >= 60 else "var(--ok)"
+        return (f'<div class="q"><div class="ql"><span>{label}</span><span>{pct:.0f}% {esc(extra)}</span></div>'
+                f'<div class="track"><div class="fill" style="width:{min(pct, 100):.0f}%;background:{color}"></div></div></div>')
+
+    quota = "".join(bar((snap.get(k) or {}).get("pct"), lab, "· 리셋 " + fmt_reset((snap.get(k) or {}).get("resets_at")))
+                    for k, lab in (("five_hour", "5시간 창"), ("seven_day", "주간 창")))
+    label = {"in-progress": "진행 중", "planned": "진행 중", "todo": "대기", "done": "완료",
+             "blocked": "중단", "manual": "사람 할 일"}
+    order = ["in-progress", "planned", "todo", "blocked", "manual", "done"]
+    cards = ""
+    for name in all_projects():
+        tasks = Project(name).tasks()
+        if not tasks:
+            continue
+        done = sum(1 for t in tasks if t.get("status") == "done")
+        pct = done * 100 / len(tasks)
+        rows = ""
+        for t in sorted(tasks, key=lambda t: (order.index(t.get("status")) if t.get("status") in order else 9, t["id"])):
+            st = str(t.get("status"))
+            cur = f' <b class="now">{esc(phase)}</b>' if t["id"] == tid and alive and st != "done" else ""
+            rows += (f'<tr class="s-{esc(st)}"><td><span class="chip">{esc(label.get(st, st))}</span></td>'
+                     f'<td class="id">{esc(str(t["id"]))}</td><td>{esc(str(t.get("title", "")))}{cur}</td></tr>')
+        cards += (f'<section><h2>{esc(name)} <small>{done}/{len(tasks)} 완료</small></h2>'
+                  f'<div class="track big"><div class="fill" style="width:{pct:.0f}%;background:var(--ok)"></div></div>'
+                  f'<table>{rows}</table></section>')
+    state = ('<span class="badge wait">한도 대기 중</span>' if alive and wait else
+             '<span class="badge run">실행 중</span>' if alive else '<span class="badge stop">멈춤</span>')
+    nowline = (f"{esc(tid)} · <b>{esc(phase)}</b> 단계 ({esc(since)} 시작)" if alive and phase else
+               esc(main[-1][:200]) if main else "기록 없음")
+    tail = "\n".join(esc(l[:220]) for l in main[-14:])
+    return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="refresh" content="5">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>autodev 진행 상황</title><style>
+:root{{--bg:#f6f7f9;--card:#fff;--fg:#1c1f24;--mut:#6b7280;--line:#e5e7eb;--ok:#16a34a;--warn:#d97706;--bad:#dc2626;--acc:#2563eb}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#111318;--card:#1b1e25;--fg:#e6e8ec;--mut:#9aa3b2;--line:#2a2f3a}}}}
+body{{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}}
+main{{max-width:880px;margin:0 auto;display:grid;gap:12px}}
+section{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}}
+h1{{font-size:18px;margin:0 0 6px}} h2{{font-size:15px;margin:0 0 8px}} small{{color:var(--mut);font-weight:400}}
+.badge{{font-size:12px;padding:2px 9px;border-radius:99px;color:#fff;vertical-align:middle;margin-left:6px}}
+.run{{background:var(--ok)}} .wait{{background:var(--warn)}} .stop{{background:var(--mut)}}
+.act{{color:var(--mut);font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.track{{height:8px;background:var(--line);border-radius:99px;overflow:hidden}} .big{{height:12px;margin-bottom:10px}}
+.fill{{height:100%;border-radius:99px}} .q{{margin-top:8px}} .ql{{display:flex;justify-content:space-between;font-size:12px;color:var(--mut)}}
+table{{width:100%;border-collapse:collapse}} td{{padding:5px 6px;border-top:1px solid var(--line);vertical-align:top}}
+td.id{{color:var(--mut);white-space:nowrap;font-size:12px}} .chip{{font-size:11px;padding:1px 8px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}}
+.s-done td{{color:var(--mut)}} .s-done .chip{{color:var(--ok);border-color:var(--ok)}}
+.s-in-progress .chip,.s-planned .chip{{background:var(--acc);color:#fff;border-color:var(--acc)}}
+.s-blocked .chip,.s-manual .chip{{color:var(--bad);border-color:var(--bad)}}
+.now{{color:var(--acc);font-size:12px;margin-left:6px}}
+pre{{margin:0;font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;color:var(--mut)}}
+</style></head><body><main>
+<section><h1>autodev 진행 상황 {state}</h1><div>{nowline}</div>
+<div class="act">{esc(action) if alive else ""}</div>{quota}
+<div class="act">갱신 {now():%H:%M:%S} · 5초마다 자동 새로고침</div></section>
+{cards}
+<section><h2>최근 로그</h2><pre>{tail}</pre></section>
+</main></body></html>"""
+
+
+def cmd_dash(args) -> None:
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            try:
+                body = dash_html().encode("utf-8")
+            except Exception as e:      # 페이지 생성 오류로 서버가 죽지 않게
+                body = f"<pre>dashboard error: {e}</pre>".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    url = f"http://127.0.0.1:{args.port}"
+    print(f"대시보드: {url}  (Ctrl-C 로 종료)", flush=True)
+    if not args.no_open:
+        sh(["open", url])
+    ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+
+
 # ── 세션 인수인계 (훅에서 호출) ──────────────────────────────────────────────
 def repo_root(cwd: str) -> Path:
     r = sh(["git", "rev-parse", "--show-toplevel"], cwd=Path(cwd) if Path(cwd).exists() else None)
@@ -1119,6 +1225,11 @@ def main() -> None:
     p = sub.add_parser("quota", help="남은 사용량과 리셋 시각 (종료코드 0=여유, 1=상한 도달, 2=알 수 없음)")
     p.add_argument("--cached", action="store_true", help="새로 측정하지 않고 최근 스냅샷 사용")
     p.set_defaults(fn=cmd_quota)
+
+    p = sub.add_parser("dash", help="진행 상황 대시보드를 브라우저로 띄움 (루프와 별개로 실행)")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--no-open", action="store_true")
+    p.set_defaults(fn=cmd_dash)
 
     p = sub.add_parser("stop", help="실행 중인 루프를 현재 단계 뒤에 멈춤")
     p.set_defaults(fn=cmd_stop)
