@@ -1,6 +1,8 @@
 # work 저장소 작업 규칙
 
-여러 개인 프로젝트가 한 저장소에 들어 있다 (`AgentTrading/`, `MiroFishTrader/` 등).
+이 저장소(GitHub `chosunghyun18/MiroFishTrader`)는 MiroFishTrader 전용이다.
+같은 폴더 안의 `AgentTrading/`, `autodev/` 는 각자 독립 git 레포(`chosunghyun18/AgentTrading`, `chosunghyun18/autodev`)이며
+이 저장소는 추적하지 않는다. 그 폴더의 커밋·푸시는 해당 폴더 안에서 한다.
 
 ## 문서
 - 프로젝트 문서의 단일 소스는 Obsidian 볼트 `/Users/jo/Documents/Obsidian Vault/Projects/work/<프로젝트>/` 이다.
@@ -22,5 +24,5 @@
 ## autodev (자율 개발 루프)
 위 사이클을 사람 없이 반복하는 드라이버가 `autodev/` 에 있다. 사용법은 `autodev/README.md`.
 - 세션이 끝나거나 압축될 때 핸드오프 문서가 자동 생성되고, 새 세션 시작 시 자동으로 주입된다.
-- 자동 루프는 이 폴더(`~/Desktop/work`)의 현재 브랜치에서 직접 작업한다. 브랜치는 바꾸지 않는다.
+- 자동 루프는 `~/Desktop/work/<프로젝트>/` 에서 직접 작업한다. 프로젝트 폴더가 독립 레포면 그 레포의 현재 브랜치에, 아니면 work 레포의 현재 브랜치에 커밋한다. 브랜치는 바꾸지 않는다.
 - 커밋에는 그 태스크가 만든 `<프로젝트>/` 안의 파일만 들어간다. 다른 세션이 고치던 파일은 섞지 않는다.
