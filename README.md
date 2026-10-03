@@ -148,7 +148,7 @@ python -m src.pipeline                           # 실제 Slack 전송
 chmod +x scripts/run_daily.sh
 crontab -e
 # 매일 오전 8시
-0 8 * * * /Users/jo/Desktop/work/MiroFishTrader/scripts/run_daily.sh >> /tmp/mirofishtrader.log 2>&1
+0 8 * * * /path/to/MiroFishTrader/scripts/run_daily.sh >> /tmp/mirofishtrader.log 2>&1
 ```
 </details>
 
@@ -165,7 +165,7 @@ crontab -e
   <key>Label</key><string>com.mirofishtrader.daily</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/jo/Desktop/work/MiroFishTrader/scripts/run_daily.sh</string>
+    <string>/path/to/MiroFishTrader/scripts/run_daily.sh</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>

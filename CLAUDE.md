@@ -5,7 +5,7 @@
 이 저장소는 추적하지 않는다. 그 폴더의 커밋·푸시는 해당 폴더 안에서 한다.
 
 ## 문서
-- 프로젝트 문서의 단일 소스는 Obsidian 볼트 `/Users/jo/Documents/Obsidian Vault/Projects/work/<프로젝트>/` 이다.
+- 프로젝트 문서의 단일 소스는 Obsidian 볼트 `~/Documents/Obsidian Vault/Projects/work/<프로젝트>/` 이다.
   작업 전에 먼저 읽고, 코드와 문서가 충돌하면 문서를 따른다.
 - 계획·결정·완료 내용은 시키지 않아도 볼트에 남긴다. 저장소 안에 문서 폴더를 새로 만들지 않는다.
   - 작업 단위 문서: `<프로젝트>/task/` (자동 루프용 태스크는 `task/autodev/`)

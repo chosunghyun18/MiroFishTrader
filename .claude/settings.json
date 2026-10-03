@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/jo/Desktop/work/autodev/autodev.py hook session-start",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/autodev/autodev.py hook session-start",
             "timeout": 20
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/jo/Desktop/work/autodev/autodev.py hook pre-compact",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/autodev/autodev.py hook pre-compact",
             "timeout": 20,
             "statusMessage": "핸드오프 문서 저장 중"
           }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/jo/Desktop/work/autodev/autodev.py hook session-end",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/autodev/autodev.py hook session-end",
             "timeout": 20
           }
         ]
