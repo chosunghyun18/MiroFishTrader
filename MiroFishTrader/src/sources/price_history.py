@@ -3,6 +3,8 @@
 Yahoo Finance chart API(키 불필요)에서 일봉을 받고, 주봉·월봉은 일봉에서 재집계한다.
 신규 필수 의존성 없음(requests + 표준 sqlite3). market.py 와 같은 DI 패턴:
 fetch 함수를 주입하면 테스트에서 HTTP 없이 돈다.
+`--mysql` 을 주면 SQLite 내용을 MySQL 로 통째 동기화한다(드라이버 대신 mysql CLI 사용,
+접속 정보는 .env 의 MYSQL_*).
 
 가격 규약 (Yahoo 그대로):
 - open/high/low/close/volume: 분할 반영(split-adjusted) 값
@@ -13,7 +15,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shutil
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -210,17 +215,95 @@ def load(symbols: Iterable[str], db_path: Path, start: date = DEFAULT_START,
         conn.close()
 
 
+MYSQL_DDL = """
+CREATE TABLE IF NOT EXISTS {t} (
+    symbol VARCHAR(16) NOT NULL, date DATE NOT NULL, {extra}
+    open DOUBLE NOT NULL, high DOUBLE NOT NULL, low DOUBLE NOT NULL,
+    close DOUBLE NOT NULL, adj_close DOUBLE NOT NULL, volume BIGINT NOT NULL,
+    split_factor DOUBLE NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (symbol, date)
+);
+"""
+MYSQL_PERIOD_EXTRA = "period_start DATE NOT NULL, trading_days INT NOT NULL,"
+MYSQL_TABLES = ("prices_daily", "prices_weekly", "prices_monthly", "corporate_actions", "load_log")
+
+
+def _sql_literal(v: Any) -> str:
+    if v is None:
+        return "NULL"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    return "'" + str(v).replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def mysql_sync_script(sqlite_path: Path, batch: int = 1000) -> str:
+    """SQLite 전체 → MySQL 교체 적재용 SQL. 한 트랜잭션이라 중간 실패 시 이전 상태 유지."""
+    parts = [
+        MYSQL_DDL.format(t="prices_daily", extra=""),
+        MYSQL_DDL.format(t="prices_weekly", extra=MYSQL_PERIOD_EXTRA),
+        MYSQL_DDL.format(t="prices_monthly", extra=MYSQL_PERIOD_EXTRA),
+        """CREATE TABLE IF NOT EXISTS corporate_actions (
+    symbol VARCHAR(16) NOT NULL, date DATE NOT NULL, kind VARCHAR(16) NOT NULL,
+    value DOUBLE NOT NULL, PRIMARY KEY (symbol, date, kind));
+CREATE TABLE IF NOT EXISTS load_log (
+    symbol VARCHAR(16) NOT NULL, loaded_at VARCHAR(32) NOT NULL, source VARCHAR(32) NOT NULL,
+    first_date DATE NULL, last_date DATE NULL, daily_rows INT NULL);
+""",
+        "START TRANSACTION;",
+    ]
+    conn = sqlite3.connect(sqlite_path)
+    try:
+        for t in MYSQL_TABLES:
+            parts.append(f"DELETE FROM {t};")
+            cur = conn.execute(f"SELECT * FROM {t}")
+            cols = ",".join(d[0] for d in cur.description)
+            while rows := cur.fetchmany(batch):
+                values = ",".join("(" + ",".join(_sql_literal(v) for v in r) + ")" for r in rows)
+                parts.append(f"INSERT INTO {t} ({cols}) VALUES {values};")
+    finally:
+        conn.close()
+    parts.append("COMMIT;")
+    return "\n".join(parts)
+
+
+def sync_mysql(sqlite_path: Path) -> Dict[str, int]:
+    """.env 의 MYSQL_* 로 접속해 동기화하고 테이블별 행 수를 돌려준다."""
+    from src.config import load_dotenv
+
+    load_dotenv()
+    mysql = shutil.which("mysql")
+    if not mysql:
+        raise RuntimeError("mysql CLI 를 찾을 수 없음")
+    env = dict(os.environ, MYSQL_PWD=os.environ["MYSQL_PASSWORD"])
+    base = [mysql, "--no-defaults", "-h", os.getenv("MYSQL_HOST", "127.0.0.1"),
+            "-P", os.getenv("MYSQL_PORT", "3306"), "-u", os.environ["MYSQL_USER"],
+            os.environ["MYSQL_DATABASE"]]
+    subprocess.run(base, input=mysql_sync_script(sqlite_path), text=True, env=env,
+                   check=True, capture_output=True)
+    q = " UNION ALL ".join(f"SELECT '{t}', COUNT(*) FROM {t}" for t in MYSQL_TABLES)
+    out = subprocess.run(base + ["-N", "-e", q], text=True, env=env, check=True,
+                         capture_output=True).stdout
+    return {t: int(n) for t, n in (line.split("\t") for line in out.strip().splitlines())}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="ETF 일·주·월봉 → SQLite")
     ap.add_argument("symbols", nargs="*", default=DEFAULT_SYMBOLS)
     ap.add_argument("--db", type=Path, default=DEFAULT_DB)
     ap.add_argument("--start", type=date.fromisoformat, default=DEFAULT_START)
+    ap.add_argument("--mysql", action="store_true", help="적재 후 MySQL(.env MYSQL_*)에 동기화")
+    ap.add_argument("--mysql-only", action="store_true", help="다운로드 없이 기존 SQLite → MySQL 동기화만")
     args = ap.parse_args(argv)
+    if args.mysql_only:
+        print(sync_mysql(args.db))
+        return 0
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     report = load(args.symbols, args.db, args.start)
     for sym, r in report.items():
         print(f"{sym}: {r['first']} ~ {r['last']}  일 {r['daily']} / 주 {r['weekly']} / 월 {r['monthly']}")
     print(f"DB: {args.db} ({args.db.stat().st_size / 1024:.0f} KiB)")
+    if args.mysql:
+        print(f"MySQL: {sync_mysql(args.db)}")
     return 0
 
 

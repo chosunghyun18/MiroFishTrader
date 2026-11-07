@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.sources.price_history import load, parse_chart, resample
+from src.sources.price_history import _sql_literal, load, mysql_sync_script, parse_chart, resample
 
 NY = ZoneInfo("America/New_York")
 DAYS = ["2024-01-29", "2024-01-30", "2024-01-31", "2024-02-01", "2024-02-02", "2024-02-05"]
@@ -78,3 +78,18 @@ def test_load_is_idempotent(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM prices_daily").fetchone()[0] == 12
     assert conn.execute("SELECT COUNT(*) FROM corporate_actions").fetchone()[0] == 4
     assert conn.execute("SELECT COUNT(*) FROM load_log").fetchone()[0] == 4
+
+
+def test_mysql_sync_script_replaces_all_tables_in_one_transaction(tmp_path):
+    db = tmp_path / "p.db"
+    load(["QQQ"], db, fetch=lambda sym, s, e: payload())
+    sql = mysql_sync_script(db, batch=4)
+    assert sql.index("START TRANSACTION;") < sql.index("DELETE FROM prices_daily;") < sql.rindex("COMMIT;")
+    assert sql.count("INSERT INTO prices_daily ") == 2  # 6행을 4행씩 배치
+    assert "('QQQ','2024-01-29',9.5,11.0,8.5,10.0,9.0,100,2.0)" in sql
+
+
+def test_sql_literal_escapes():
+    assert _sql_literal(None) == "NULL"
+    assert _sql_literal("O'Neil\\x") == "'O''Neil\\\\x'"
+    assert _sql_literal(3) == "3" and _sql_literal(0.1) == "0.1"
