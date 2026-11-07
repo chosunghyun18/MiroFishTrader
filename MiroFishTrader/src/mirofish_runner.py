@@ -32,7 +32,7 @@ from .mirofish_export import (
 )
 from .polymarket import PolymarketClient
 from .seed import generate_seed
-from .sources.market import AlphaVantageClient, FinnhubClient, FredClient, StooqClient
+from .sources.market import AlphaVantageClient, FinnhubClient, FredClient, StooqClient, YahooClient
 from .sources.news import GdeltClient
 from .sources.social import PrawRedditClient, PytrendsClient
 
@@ -184,7 +184,7 @@ def main() -> None:
 
     settings = Settings.from_env()
 
-    market_quote_clients = [StooqClient()]
+    market_quote_clients = [StooqClient(), YahooClient()]
     if settings.alphavantage_api_key:
         market_quote_clients.append(AlphaVantageClient(settings.alphavantage_api_key))
     if settings.finnhub_api_key:

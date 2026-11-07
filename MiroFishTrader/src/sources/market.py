@@ -1,7 +1,7 @@
 """EOD 시세(ETF/지수) + FRED 매크로 지표 조회.
 
 비용 최소화: 무료 티어만 사용, 신규 필수 의존성 없음(requests만 사용).
-시세는 Stooq(키 불필요) → AlphaVantage → Finnhub 순으로 폴백하는 체인으로 가져오고,
+시세는 Stooq(키 불필요) → Yahoo(키 불필요) → AlphaVantage → Finnhub 순으로 폴백하는 체인으로 가져오고,
 매크로 지표는 FRED에서 가져온다. 네트워크/파싱 실패 시 None/빈 리스트를 돌려
 시드 생성이 degrade 하도록 한다. (news.py/polymarket.py와 동일한 DI 패턴:
 Protocol 클라이언트 주입 → 테스트 시 HTTP 없이.)
@@ -12,7 +12,10 @@ import csv
 import io
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Protocol, Tuple
+
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -21,6 +24,7 @@ logger = logging.getLogger(__name__)
 STOOQ_BASE = "https://stooq.com/q/l/"
 ALPHA_VANTAGE_BASE = "https://www.alphavantage.co/query"
 FINNHUB_BASE = "https://finnhub.io/api/v1/quote"
+YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
 # 반도체/AI/금리 중심 워치리스트 (v1 최소 세트).
@@ -57,7 +61,7 @@ def _opt_float(value: Any) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# 시세 (Stooq 우선 → AlphaVantage → Finnhub)
+# 시세 (Stooq 우선 → Yahoo → AlphaVantage → Finnhub)
 # ---------------------------------------------------------------------------
 
 
@@ -113,6 +117,56 @@ class StooqClient:
             return parse_stooq_csv(resp.text)
         except (requests.RequestException, ValueError) as exc:
             logger.warning("Stooq 시세 조회 실패(%s): %s", symbol, exc)
+            return None
+
+
+def parse_yahoo_chart(payload: Dict[str, Any], symbol: str) -> Optional[Quote]:
+    """Yahoo chart(range=5d, interval=1d) 응답 → Quote. 등락률은 전일 종가 대비."""
+    try:
+        result = payload["chart"]["result"][0]
+        closes = [c for c in result["indicators"]["quote"][0]["close"] if c is not None]
+        stamps = [t for t, c in zip(result["timestamp"], result["indicators"]["quote"][0]["close"])
+                  if c is not None]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not closes:
+        return None
+    price = float(closes[-1])
+    day_change_pct: Optional[float] = None
+    if len(closes) >= 2 and closes[-2]:
+        day_change_pct = (price - closes[-2]) / closes[-2] * 100
+    tz = result.get("meta", {}).get("exchangeTimezoneName") or "America/New_York"
+    asof = datetime.fromtimestamp(stamps[-1], ZoneInfo(tz)).date().isoformat()
+    return Quote(symbol=symbol, price=price, day_change_pct=day_change_pct, asof=asof)
+
+
+class YahooClient:
+    """Yahoo Finance chart API 시세. 키 불필요. Stooq 형식(qqq.us)도 받아 변환한다."""
+
+    def __init__(
+        self,
+        base_url: str = YAHOO_CHART_BASE,
+        timeout: int = 30,
+        *,
+        session: Optional[requests.Session] = None,
+    ) -> None:
+        self.base_url = base_url
+        self.timeout = timeout
+        self._session = session or requests.Session()
+
+    def fetch_quote(self, symbol: str) -> Optional[Quote]:
+        ticker = symbol.upper().removesuffix(".US")
+        try:
+            resp = self._session.get(
+                self.base_url + ticker,
+                params={"range": "5d", "interval": "1d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return parse_yahoo_chart(resp.json(), symbol)
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("Yahoo 시세 조회 실패(%s): %s", symbol, exc)
             return None
 
 

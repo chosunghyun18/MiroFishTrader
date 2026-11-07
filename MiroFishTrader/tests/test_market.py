@@ -11,6 +11,7 @@ from src.sources.market import (
     fetch_quotes,
     parse_fred_observations,
     parse_stooq_csv,
+    parse_yahoo_chart,
 )
 
 STOOQ_CSV_OK = "Symbol,Date,Open,High,Low,Close,Volume\nSPY.US,2026-07-01,550.00,555.00,549.00,555.00,80000000\n"
@@ -179,3 +180,21 @@ def test_fetch_macro_skips_failed_series_but_keeps_others():
     )
     assert len(res) == 1
     assert res[0].series_id == "DFF"
+
+
+YAHOO_CHART_OK = {"chart": {"error": None, "result": [{
+    "meta": {"exchangeTimezoneName": "America/New_York"},
+    "timestamp": [1762525800, 1762785000, 1762871400],  # 2025-11-07, 11-10, 11-11 09:30 ET
+    "indicators": {"quote": [{"close": [100.0, None, 110.0]}]},
+}]}}
+
+
+def test_parse_yahoo_chart_uses_prev_close_and_skips_nulls():
+    q = parse_yahoo_chart(YAHOO_CHART_OK, "qqq.us")
+    assert q == Quote(symbol="qqq.us", price=110.0, day_change_pct=10.0, asof="2025-11-11")
+
+
+def test_parse_yahoo_chart_bad_payload_returns_none():
+    assert parse_yahoo_chart({"chart": {"result": None}}, "qqq.us") is None
+    empty = {"chart": {"result": [{"timestamp": [], "indicators": {"quote": [{"close": []}]}}]}}
+    assert parse_yahoo_chart(empty, "qqq.us") is None
