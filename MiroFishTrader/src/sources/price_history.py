@@ -30,7 +30,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-DEFAULT_SYMBOLS: List[str] = ["QQQ", "QLD", "TQQQ"]
+DEFAULT_SYMBOLS: List[str] = ["QQQ", "QLD", "TQQQ", "XLK", "TECL"]  # 나스닥100 1·2·3배 + 기술섹터 1·3배
 DEFAULT_START = date(2000, 1, 1)
 DEFAULT_DB = Path(__file__).resolve().parents[2] / "shared" / "prices.db"
 
